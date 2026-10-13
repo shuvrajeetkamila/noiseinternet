@@ -299,9 +299,12 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             // it and the link eats its own tail. The method is addAllowedApplication(ApplicationInfo)
             // - not allowApplication(String), which is what this file claimed until the compiler
             // said otherwise - and it throws NameNotFoundException if the package is unknown.
+            // The overload the SDK resolves here takes a package name (the ApplicationInfo form needs
+            // a lookup that can fail for a package the user just changed); a failure to exclude
+            // ourselves is not fatal, it just means the link may loop its own traffic, so it is
+            // reported into tunnelNote rather than swallowed.
             try {
-                val mine = packageManager.getApplicationInfo(packageName, 0)
-                b = b.addAllowedApplication(mine)
+                b = b.addAllowedApplication(packageName)
             } catch (e: Exception) {
                 tunnelNote = "own app not excluded from tunnel (${e.javaClass.simpleName}): " +
                     "the link may loop its own traffic"

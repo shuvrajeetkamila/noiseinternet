@@ -272,7 +272,7 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
   // argument is an audio-session GUID - the capture event belongs in SetEventHandle (below), not
   // here. Passing frames/handles was a wrong-unit bug that MSVC's prototype caught for the handle.
   REFERENCE_TIME rate = (REFERENCE_TIME)f.Format.nSamplesPerSec;
-  REFERENCE_TIME hns_buf = rate ? (REFERENCE_TIME)(10000000.0LL * buf_frames / rate) : 300000;
+  REFERENCE_TIME hns_buf = rate ? (REFERENCE_TIME)(10000000.0 * buf_frames / rate) : 300000;
   REFERENCE_TIME hns_per = flow == eCapture ? hsn : hpn;
   hr = s.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, init_flags, hns_buf, hns_per,
                         (WAVEFORMATEX*)&s.fmt, nullptr);
