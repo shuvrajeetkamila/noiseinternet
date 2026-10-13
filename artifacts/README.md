@@ -45,7 +45,7 @@ description of intentions.
   * `lint`, `assembleRelease`, and any device install were never exercised on the Android side beyond
   `assembleDebug`.
 * **These binaries are not reproducible builds.** Nothing in this repository claims otherwise: the debug
-  signing key is per-run and no source-date-date-normalisation is set up, so a hash pins a *download*, not
+  signing key is per-run and no source-date normalisation is set up, so a hash pins a *download*, not
   a build. Verifying a binary means checking it against the manifest published with it, or rebuilding from
   the commands below and accepting that the output will differ byte-for-byte from the asset while the
   compiled code paths are the same.
