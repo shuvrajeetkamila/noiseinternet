@@ -9,6 +9,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <propsys.h>   // PROPVAR / PropVariantClear (MSVC does not pull this in via the others)
 
 #include <new>
 #include <string>

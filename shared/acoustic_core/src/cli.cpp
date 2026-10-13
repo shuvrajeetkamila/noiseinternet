@@ -5,14 +5,26 @@
 // commands that carry the most evidential weight are `ni decode` (a payload recovered from a
 // real recording, hash-compared) and `ni demo` (a real HTTP response pulled through the
 // receiver's proxy while the only thing crossing between the two nodes is audio samples).
-#include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+// The demo spawns a client process (curl) and reads its output while the audio pump keeps running.
+// That needs fork/execvp/waitpid, which Windows does not have. Rather than fake it with a blocking
+// _popen (which would deadlock: the child waits for the link, the link waits for this thread), the
+// spawn path is compiled out on that platform and `ni demo` says so. `ni linksim`, `ni selftest`,
+// `ni bench`, `ni render` and `ni decode` are unaffected - and the proxy leg itself is exercised by
+// the unit tests and by the app.
+// NI_NO_DEMO_SPAWN lets a POSIX-like target opt out explicitly (the Windows build sets it in CMake
+// as well, so the intent is visible in the build file too, not only in the compiler id).
+#if (defined(__unix__) || defined(__APPLE__)) && !defined(NI_NO_DEMO_SPAWN)
+#define NI_HAVE_SPAWN 1
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #include <algorithm>
 #include <map>
 #include <sstream>
@@ -814,6 +826,15 @@ struct Pump {
   }
   int64_t run(std::vector<uint8_t>* out, const std::string& prog,
               const std::vector<std::string>& args, int64_t budget_ms) {
+#ifndef NI_HAVE_SPAWN
+    (void)out; (void)prog; (void)args; (void)budget_ms;
+    fprintf(stderr,
+            "  ni demo needs a POSIX spawn to run the HTTP client, so the proxy leg cannot be\n"
+            "  exercised from this binary on this platform. Use the Windows app (it owns the same\n"
+            "  proxy in-process); `ni linksim` still measures the link, and the proxy itself is\n"
+            "  covered by the unit tests.\n");
+    return -1;
+#else
     std::string tmpf = "/tmp/ni_demo_" + std::to_string(getpid()) + ".out";
     int fd = open(tmpf.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return -1;
@@ -861,6 +882,7 @@ struct Pump {
       remove(tmpf.c_str());
     }
     return status;
+#endif
   }
 };
 

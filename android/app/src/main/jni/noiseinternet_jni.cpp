@@ -20,6 +20,10 @@
 #include "ni/abi.h"
 #include "ni/common.h"  // ni_strerror, NI_ERR_* codes
 
+// ni_strerror and the NI_ERR_* codes live in namespace ni; the flat ABI functions (ni_abi_*) are
+// extern "C" at global scope. Without this the file compiles on nothing but gcc+ADL luck.
+using namespace ni;
+
 namespace {
 
 jclass g_core_class = nullptr;

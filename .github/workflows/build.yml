@@ -76,11 +76,17 @@ jobs:
           set +e
           {
             echo "::group::sdkmanager"
-            yes | sdkmanager --licenses >/dev/null 2>&1
-            sdkmanager --install \
-              "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" \
-              "ndk;${ANDROID_NDK}" "cmake;3.22.1"
-            echo "sdkmanager rc=$?"
+            # Not on PATH on every runner image (CI proved that); find it, and if it is genuinely
+            # absent let AGP resolve the pinned packages itself rather than failing the job here.
+            SDKM=$(command -v sdkmanager || true)
+            [ -n "$SDKM" ] || SDKM=$(ls "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1 || true)
+            if [ -n "$SDKM" ]; then
+              yes | "$SDKM" --licenses >/dev/null 2>&1
+              "$SDKM" --install "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" \
+                "ndk;${ANDROID_NDK}" "cmake;3.22.1" | tail -2
+            else
+              echo "sdkmanager not found; relying on the preinstalled SDK / AGP auto-download"
+            fi
             echo "::endgroup::"
             echo "::group::gradle"
             (cd android && gradle :app:assembleDebug --no-daemon --stacktrace --warning-mode=all)

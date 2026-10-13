@@ -40,9 +40,14 @@ if(MSVC)
 endif()
 target_link_libraries(ni_core PUBLIC ws2_32)
 
+# audio_wasapi.cpp is part of ni_core, not of the app: the tests (t_abi calls ni_audio_enumerate,
+# which resolves to ni_wasapi_enumerate when NI_WITH_WASAPI is on) link the same library, and a
+# backend that only the GUI links would leave those tests unresolvable. Found by CI, first MSVC run.
+target_sources(ni_core PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/audio_wasapi.cpp)
+target_link_libraries(ni_core PUBLIC ole32 uuid ksuser propsys)
+
 add_executable(NoiseInternet
-  ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/main.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/audio_wasapi.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/main.cpp)
 target_link_libraries(NoiseInternet PRIVATE ni_core)
 # ole32: COM + CoTaskMemFree.  uuid: the __uuidof/IID symbols.  ksuser: KSDATAFORMAT_* subtypes.
 target_link_libraries(NoiseInternet PRIVATE ole32 uuid ksuser)
@@ -50,6 +55,8 @@ target_link_libraries(NoiseInternet PRIVATE ole32 uuid ksuser)
 # The CLI too, so the same machine can run `ni selftest` / `ni render` / `ni decode` against the same
 # core it just shipped in the GUI-less app.
 add_executable(ni ${NI_CORE_DIR}/src/cli.cpp)
+# `ni demo` spawns curl; that path is POSIX-only and is compiled out here (see cli.cpp).
+target_compile_definitions(ni PRIVATE NI_NO_DEMO_SPAWN=1)
 target_link_libraries(ni PRIVATE ni_core)
 
 enable_testing()

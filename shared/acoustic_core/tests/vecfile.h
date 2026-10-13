@@ -37,9 +37,16 @@ inline std::vector<std::vector<std::string> > load(const char* name = "vectors.t
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
     if (!n || line[0] == '#') continue;
     std::vector<std::string> toks;
-    char* save = nullptr;
-    for (char* t = strtok_r(line, " \t", &save); t; t = strtok_r(nullptr, " \t", &save))
-      toks.push_back(t);
+    // Hand-rolled split instead of strtok_r/strtok_s: the POSIX and MSVC spellings of the
+    // thread-safe tokenizer differ in arity, and a test helper should not care.
+    size_t i = 0;
+    while (i < n) {
+      while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
+      size_t j = i;
+      while (j < n && line[j] != ' ' && line[j] != '\t') j++;
+      if (j > i) toks.push_back(std::string(line + i, j - i));
+      i = j;
+    }
     if (!toks.empty()) out.push_back(toks);
   }
   fclose(f);

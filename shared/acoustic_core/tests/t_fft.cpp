@@ -52,7 +52,7 @@ int main() {
     ni_synthesize_real(&f, re.data(), im.data(), k0, k1, x.data());
     double worst = 0;
     for (int m = 0; m < N; m++) {
-      double want = (2.0 / N) * cos(2.0 * M_PI * kb * m / N);
+      double want = (2.0 / N) * cos(2.0 * NI_PI * kb * m / N);
       worst = std::max(worst, fabs(want - (double)x[m]));
     }
     NT_CHECK_MSG(worst < 1e-6, "ni_synthesize_real is not 2/n*Re(sum S[k] e^{+j2pi km/n})");
@@ -136,10 +136,10 @@ int main() {
       double ma = hypot(ar[i], ai[i]), mb = hypot(br[i], bi[i]);
       worst_m = std::max(worst_m, fabs(ma - mb));
       double pa = atan2(ai[i], ar[i]), pb = atan2(bi[i], br[i]);
-      double d = pb - pa - 2.0 * M_PI * (double)k * sh / N;
-      d = fmod(d + M_PI, 2.0 * M_PI);
-      if (d < 0) d += 2.0 * M_PI;  // fmod keeps the sign of the dividend: wrap it explicitly
-      d -= M_PI;
+      double d = pb - pa - 2.0 * NI_PI * (double)k * sh / N;
+      d = fmod(d + NI_PI, 2.0 * NI_PI);
+      if (d < 0) d += 2.0 * NI_PI;  // fmod keeps the sign of the dividend: wrap it explicitly
+      d -= NI_PI;
       worst_p = std::max(worst_p, fabs(d));
     }
     NT_CHECK_MSG(worst_m < 1e-5, "circular shift changed subcarrier magnitudes");

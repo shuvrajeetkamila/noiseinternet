@@ -135,9 +135,15 @@ class NoiseCore(config: Config) {
                 } catch (e: Exception) {
                     // A malformed status document is a bug worth showing, never worth hiding behind
                     // plausible zeros.
-                    return Status("unparsable", "-", "-", null, false, null, null, null, null, null,
-                        null, null, null, null, null, null, null, null, null, false, false,
-                        "status JSON could not be parsed: ${e.message}", json)
+                    return Status(
+                        state = "unparsable", role = "-", profile = "-", sampleRate = null,
+                        peerOnline = false, snrDb = null, rssiDbfs = null, noiseDbfs = null,
+                        evecPct = null, rttMs = null, lossPct = null, usefulBpsUp = null,
+                        usefulBpsDown = null, framesSent = null, framesReceived = null,
+                        retries = null, crcFail = null, bytesSent = null, bytesReceived = null,
+                        mtu = null, tunnelUp = false, internetOk = false,
+                        audioNote = "status JSON could not be parsed: ${e.message}", raw = json,
+                    )
                 }
 
                 fun d(k: String): Double? = if (o.isNull(k)) null else o.optDouble(k)

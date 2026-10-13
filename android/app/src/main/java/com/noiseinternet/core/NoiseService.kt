@@ -124,7 +124,7 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             sessionId = intent?.getIntExtra(EXTRA_SESSION, 0) ?: 0,
             sampleRate = intent?.getIntExtra(EXTRA_FS, 48000) ?: 48000,
             duplex = intent?.getBooleanExtra(EXTRA_DUPLEX, false) ?: false,
-            enableReceiverProxy = true,
+            proxyEnable = true,
         )
         startForeground(4242, buildNotification("starting"))
         acquireWakeLock()
@@ -147,8 +147,8 @@ class NoiseService : VpnService(), AudioEngine.Sink {
 
         val a = AudioEngine(this, cfg.sampleRate, this)
         audio = a
-        val wantIn = pick(intent?.getIntExtra(EXTRA_INPUT, -1), a.listInputs())
-        val wantOut = pick(intent?.getIntExtra(EXTRA_OUTPUT, -1), a.listOutputs())
+        val wantIn = pick(intent?.getIntExtra(EXTRA_INPUT, -1) ?: -1, a.listInputs())
+        val wantOut = pick(intent?.getIntExtra(EXTRA_OUTPUT, -1) ?: -1, a.listOutputs())
         if (!a.start(wantIn, wantOut)) {
             // The honest path: no audio, no link. We keep the node up so the UI can show why, and the
             // tunnel stays down, but nothing here pretends a session exists.
@@ -289,14 +289,24 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             return false
         }
         try {
-            val p = Builder()
+            var b = Builder()
                 .setSession("NOISE INTERNET")
                 .addAddress("10.77.0.2", 30)
                 .addDnsServer("8.8.8.8")
                 .addRoute("0.0.0.0", 0)
                 .setBlocking(true)
-                .allowApplication(packageName)     // otherwise our own fetches loop back into the tun
-                .establish()
+            // Our own traffic must stay outside the tunnel, or the fetch that feeds it is captured by
+            // it and the link eats its own tail. allowApplication takes an ApplicationInfo, not a
+            // package name, and enumerating installed apps can be refused on API 30+ without
+            // QUERY_ALL_PACKAGES - so try the broad form and fall back to the minimum.
+            try {
+                val mine = packageManager.getApplicationInfo(packageName, 0)
+                b = b.allowApplication(mine)
+            } catch (e: Exception) {
+                tunnelNote = "own app not excluded from tunnel (${e.javaClass.simpleName}): " +
+                    "the link may loop its own traffic"
+            }
+            val p = b.establish()
             if (p == null) {
                 tunnelNote = "user must approve the VPN request first (VpnService.prepare)"
                 return false
@@ -400,9 +410,12 @@ class NoiseService : VpnService(), AudioEngine.Sink {
     }
 
     /** Flows are keyed by the 4-tuple so return traffic finds the app that opened the socket. */
+    private fun v4(b: ByteArray): String =
+        "${b[0].toInt() and 0xFF}.${b[1].toInt() and 0xFF}.${b[2].toInt() and 0xFF}." +
+            "${b[3].toInt() and 0xFF}"
+
     private fun streamKey(src: ByteArray, sp: Int, dst: ByteArray, dp: Int): String =
-        "${src.joinToString(".") { (it and 0xFF).toString() }}:$sp->" +
-            "${dst.joinToString(".") { (it and 0xFF).toString() }}:$dp"
+        "${v4(src)}:$sp->${v4(dst)}:$dp"
 
     /** Minimal IPv4 + UDP frame. The UDP checksum is left 0, which IPv4 permits for UDP. */
     private fun buildUdpPacket(f: Flow, body: ByteArray): ByteArray {

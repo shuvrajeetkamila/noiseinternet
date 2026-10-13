@@ -65,7 +65,10 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
         profileSpinner = findViewById(R.id.profile)
         inputSpinner = findViewById(R.id.input_device)
         outputSpinner = findViewById(R.id.output_device)
-        sessionEdit = findViewById(R.id.session_id).apply { inputType = InputType.TYPE_CLASS_NUMBER }
+        sessionEdit = findViewById(R.id.session_id)
+        // Numbers only, but deliberately not a hard filter: a typo must show up as a parse error in
+        // the UI rather than as a silently mangled session id.
+        sessionEdit.inputType = InputType.TYPE_CLASS_NUMBER
         secretEdit = findViewById(R.id.secret)
         duplexBox = findViewById(R.id.duplex)
         tunnelBox = findViewById(R.id.tunnel)
