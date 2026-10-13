@@ -176,7 +176,14 @@ jobs:
               $hits = Select-String -Path $f -Pattern 'error [A-Z]+[0-9]+|CMake Error|tests passed|tests failed|Failed +[0-9]' |
                 Select-Object -First 12 | ForEach-Object { $_.Line }
               $b += "`n--- $f ---`n" + (($hits | ForEach-Object { $_ }) -join "`n")
-              if ($f -eq 'ctest.log') { $b += "`n[tail]`n" + ((Get-Content $f -Tail 6) -join "`n") }
+              if ($f -eq 'ctest.log') {
+                # ctest --output-on-failure prints the failing suite's own stdout, which is where the
+                # assertion that actually differs lives. Grab the context around each failure marker
+                # instead of a summary line, so a red test on one platform is diagnosable from here.
+                $ctx = Select-String -Path $f -Pattern '\*\*\*Failed' -Context 0,32 |
+                  ForEach-Object { $_.Line; $_.Context.PostContext }
+                $b += "`n--- ctest failures ---`n" + (($ctx | Select-Object -First 60) -join "`n")
+              }
             }
           }
           $b += "`n``````"
