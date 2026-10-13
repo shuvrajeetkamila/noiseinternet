@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 // session.cpp — AcousticLink: PHY glue, duplex scheduling, adaptation, echo cancellation.
 //
 // Half-duplex rule (default, prompt 5.6): the link MASTER (normally the giver) owns the
@@ -245,10 +247,30 @@ void AcousticLink::handle_pdu(const uint8_t* pdu, size_t n, const PhyStats& st, 
 }
 
 // ---------------------------------------------------------------- transmit path
-void AcousticLink::render_burst(const uint8_t* pdu, size_t n) {
+void AcousticLink::clamp_burst_to_phy() {
+  if (!modem_) return;
+  int cap = modem_->max_payload() - (int)NI_PDU_LEN_BYTES;
+  if (cap < (int)(NI_HEADER_BYTES + NI_CRC32_BYTES + NI_PDU_LEN_BYTES))
+    cap = (int)(NI_HEADER_BYTES + NI_CRC32_BYTES + NI_PDU_LEN_BYTES);
+  ArqConfig& ac = arq_.config_mut();
+  if (cap < ac.max_burst_bytes) ac.max_burst_bytes = cap;
+}
+
+// ---------------------------------------------------------------- transmit path
+int AcousticLink::render_burst(const uint8_t* pdu, size_t n) {
   std::vector<float> wave;
   int rc = modem_->tx_render(pdu, n, &wave);
-  if (rc != NI_OK) return;
+  if (rc != NI_OK) {
+    // This used to `return;` in silence. The ARQ had already marked the frames in this burst as
+    // in flight and the caller counted the burst, so a message whose packing exceeded the modem's
+    // per-burst capacity was dropped on the floor while both endpoints' counters said it had been
+    // transmitted - the exact shape of the "acks flow, nothing is delivered" failure in
+    // reports/RESULTS.md. Now it is a counted, named failure and the frames go back in the queue.
+    c_.tx_render_fail++;
+    last_error_ = "tx_render refused a " + std::to_string(n) + "-byte burst: " + ni_strerror(rc);
+    arq_.cancel_burst();
+    return rc;
+  }
   txq_.insert(txq_.end(), wave.begin(), wave.end());
   if (aec_ && !played_.empty()) {
     for (size_t i = 0; i < wave.size(); i++) {
@@ -256,10 +278,11 @@ void AcousticLink::render_burst(const uint8_t* pdu, size_t n) {
       play_write_ = (play_write_ + 1) % played_.size();
     }
   }
+  return NI_OK;
 }
 
 void AcousticLink::transmit(const uint8_t* pdu, size_t n, int64_t now_ms) {
-  render_burst(pdu, n);
+  if (render_burst(pdu, n) != NI_OK) return;  // no wave, no burst, no "sent" bookkeeping
   pending_tx_frames_ = last_packed_frames_;
   tx_played_ms_ = (double)now_ms;
   c_.tx_bursts++;
@@ -317,7 +340,15 @@ int AcousticLink::tick(int64_t now_ms) {
   if (may_tx) {
     uint8_t buf[2 + NI_MAX_BURST_PDU];
     size_t len = 0;
-    int n = arq_.build_pdu(now_ms, buf, sizeof buf, &len, opt_.is_master);
+    // The burst can never be bigger than what one burst of this profile carries. Clamping only in
+    // ArqConfig was not enough - the node assigns its own ArqConfig after the link is built, which
+    // put max_burst_bytes back to 1024 - so the limit is applied here, at the buffer, where nothing
+    // can overwrite it. Without it, every multi-frame burst was refused by tx_render (NI_ERR_OVERFLOW)
+    // while the ARQ had already marked those frames in flight: the frames never went out, never got
+    // acked, and were re-packed on every tick. See reports/RESULTS.md 4.6.
+    size_t phy = (size_t)modem_->max_payload();
+    size_t cap = phy < sizeof buf ? phy : sizeof buf;
+    int n = arq_.build_pdu(now_ms, buf, cap, &len, opt_.is_master);
     if (n > 0 && len >= 2) {
       last_packed_frames_ = (size_t)n;
       tx_samples_total_ = (size_t)modem_->burst_samples_for(len);
@@ -348,7 +379,8 @@ std::string AcousticLink::diagnostics_json() const {
     << ", \"pairing\": \"" << (pair_ ? pair_->state_name() : "none") << "\""
     << (pair_ ? ", \"pairing_failures\": " + std::to_string((int)pair_->failures()) : "")
     << ", \"counters\": {\"rx_bursts\": " << c_.rx_bursts << ", \"tx_bursts\": " << c_.tx_bursts
-    << ", \"rx_crc_fail\": " << c_.rx_crc_fail << ", \"rx_no_frame\": " << c_.rx_no_frame << "}"
+    << ", \"rx_crc_fail\": " << c_.rx_crc_fail << ", \"rx_no_frame\": " << c_.rx_no_frame
+    << ", \"tx_render_fail\": " << c_.tx_render_fail << "}"
     << ", \"arq\": " << arq_.stats().to_json() << "}";
     ;
   return o.str();

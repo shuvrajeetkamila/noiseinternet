@@ -248,7 +248,55 @@ in order of likelihood:
    adapts alone. Making the preamble profile-independent (as 802.11 does with its non-HT preamble) is
    the real fix and is not implemented.
 
-### 4.6 Suspect 4 (new, from `ni bench`): the same profile that fails in linksim decodes 100 % burst-by-burst
+### 4.6 ROOT CAUSE FOUND (this supersedes the speculation above; the suspects listed there were downstream symptoms)
+
+Instrumenting the transmit path of `ni linksim` on the profile that decodes 100 % of single bursts in
+`ni bench` produced the answer, and it is not a modem problem:
+
+```
+[render_fail] n=346 rc=-13 (NI_ERR_OVERFLOW) max_payload=82 cap=1024
+[render_fail] n=370 rc=-13 (NI_ERR_OVERFLOW) max_payload=82 cap=1024
+```
+
+`ArqConfig::max_burst_bytes` is 1024, but a burst on FD-LOW-DBPSK carries at most 82 bytes of PDU
+(the `maxPay` column of `ni profiles`). So `pack_frames` filled a burst with six 62-byte DATA frames
+(372 bytes), `Modem::tx_render` correctly refused it with `NI_ERR_OVERFLOW`, and
+`AcousticLink::render_burst` **returned in silence**. The caller still counted the burst as transmitted
+and the ARQ still marked those frames in flight, so: no waveform, no delivery, no ack, an eternal
+retransmit loop, and counters that looked healthy. Small frames (ACK 44 B, PAIR 58 B) fit inside 82
+bytes, which is exactly why pairing succeeded and acks flowed while payload bytes never moved - and why
+`ni bench`, `ni phy test` and the WAV round trip, all of which render one frame per burst, worked all
+along. Measured with the failure counted: `tx_render_fail` 57 233 bursts on side A and 57 628 on side B
+in a 57 s session, during which `tx_payload_bytes` reported 14 MB "sent" that never existed. An `up_bps`
+of 5.26 b/s printed in one of those runs was a harness artefact from a stale byte count, **not** a link
+rate, and is reported here so it cannot be quoted as one.
+
+Fixes now in the tree, each with the reasoning in the source comment:
+
+1. `render_burst` returns the modem's error; `transmit` does not record a burst that was never
+   rendered; the failure increments a new `tx_render_fail` counter that appears in the diagnostics JSON.
+2. `ArqEngine::cancel_burst()` releases the frames of a burst that failed to render, so they are
+   retried at once instead of waiting for an ack that can never come.
+3. The per-burst byte budget is clamped to the modem's capacity **at the `build_pdu` call site**
+   (`AcousticLink::tick`). Clamping `ArqConfig::max_burst_bytes` in the link constructor was tried first
+   and is not enough: the node assigns its own `ArqConfig` afterwards, which restored 1024. Both are
+   kept, and the `measured_airtime_ms 2 686` / `-45 dB` "suspects" above are consequences of this bug,
+   not causes.
+4. An acknowledgement that does not fit in the remaining burst space is deferred; it no longer abandons
+   the data frames already encoded in that burst (returning 0 from `pack_frames` used to discard them
+   after they had been marked in flight).
+5. `int render_burst` was left without a `return` at the end while the void version was being converted:
+   falling off the end of a non-void function segfaulted the `-O1` build and ran "fine" under `-O0`+ASan.
+   Recorded because it is a good example of an optimisation-dependent crash being mistaken for a protocol
+   bug.
+
+State after the fix: the burst overflow is gone (no `tx_render_fail`), but the simulation now needs about
+four times as many small bursts, and the receive path rescans its 1.2 s capture window on every 1 ms
+feed, so a 12 s virtual run did not finish in 90 s of wall clock. Gate C therefore still has no passing
+end-to-end transfer; the next step is a bounded scan window in `AcousticLink::feed_pcm` (or feeding in
+larger blocks), not another look at the modem. `ctest` remains 100 % tests passed out of 8.
+
+### 4.6a Earlier speculation, kept for the record: the same profile that fails in linksim decodes 100 % burst-by-burst
 
 `ni bench --profile 2,3,5,10,11 --trials 3` (315 rows, `reports/bench_sweep.csv` / `.json`) feeds
 `ni_phy_test` one padded burst at a time through the same channel model. Medians over 9 trials per point:

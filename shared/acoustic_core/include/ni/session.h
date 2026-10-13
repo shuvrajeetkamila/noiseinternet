@@ -126,6 +126,8 @@ class ArqEngine {
   int build_pdu(int64_t now_ms, uint8_t* pdu, size_t cap, size_t* out_len, bool allow_poll);
   // Called by the transport once the waveform really went out (starts RTT/timeout timers).
   void note_emitted(size_t frames_in_burst, int64_t now_ms, double airtime_ms);
+  // Release the frames of a burst that was never rendered (see AcousticLink::render_burst).
+  void cancel_burst();
 
   // ---- receive --------------------------------------------------------------
   // Parse a decoded PDU: validates every frame, applies the ack/bitmap state, and queues
@@ -287,6 +289,7 @@ class AcousticLink {
 
   struct Counters {
     uint64_t rx_bursts = 0, tx_bursts = 0, rx_crc_fail = 0, rx_no_frame = 0, dup = 0;
+    uint64_t tx_render_fail = 0;  // bursts the modem refused to render (see clamp_burst_to_phy)
   };
   // UI hooks
   std::function<void(const PhyStats&)> on_stats_;
@@ -297,7 +300,8 @@ class AcousticLink {
 
  private:
   void transmit(const uint8_t* pdu, size_t n, int64_t now_ms);
-  void render_burst(const uint8_t* pdu, size_t n);
+  int render_burst(const uint8_t* pdu, size_t n);  // NI_OK, or the modem's refusal (counted)
+  void clamp_burst_to_phy();  // keeps a burst within what the modem can carry
   void handle_pdu(const uint8_t* pdu, size_t n, const PhyStats& st, int64_t now_ms);
 
   LinkOptions opt_;

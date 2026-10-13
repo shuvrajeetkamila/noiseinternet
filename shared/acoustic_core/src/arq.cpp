@@ -202,15 +202,22 @@ int ArqEngine::pack_frames(int64_t now_ms, uint8_t* pdu, size_t cap, size_t* out
     // The acknowledgement frame is 16 + body + 4 (+4 tag) bytes; if it does not fit in what is
     // left of this burst, that is not an error - the ack is simply still pending for the next one.
     size_t need = NI_HEADER_BYTES + body.size() + NI_CRC32_BYTES + (keys_ ? 4u : 0u);  // + MAC
-    if (need > limit - off) { ack_dirty_ = true; *out_len = 0; return 0; }
-    int rc = seal_and_encode(keys_, f, body, false, pdu + off, limit - off);
-    if (rc <= 0) { ack_dirty_ = true; *out_len = 0; return 0; }
-    off += (size_t)rc;
-    n++;
-    st_.acks_sent++;
-    if (nack_pending_) st_.nacks_sent++;
-    ack_dirty_ = false;
-    nack_pending_ = false;
+    // An acknowledgement that does not fit in the remaining room is *deferred*, not fatal. Returning
+    // 0 here used to abandon the data frames already encoded into this burst, whose senders had
+    // already been told the burst was in flight - so with a small per-burst capacity (the FDD profiles
+    // carry 80 bytes of PDU) a burst could sit in that state indefinitely. Now the ack stays pending
+    // and the data goes out.
+    if (need <= limit - off) {
+      int rc = seal_and_encode(keys_, f, body, false, pdu + off, limit - off);
+      if (rc > 0) {
+        off += (size_t)rc;
+        n++;
+        st_.acks_sent++;
+        if (nack_pending_) st_.nacks_sent++;
+        ack_dirty_ = false;
+        nack_pending_ = false;
+      }
+    }
   }
   while (n < max_frames && off + NI_HEADER_BYTES + NI_CRC32_BYTES < limit) {
     int pick = -1;
@@ -298,6 +305,17 @@ int ArqEngine::build_pdu(int64_t now_ms, uint8_t* pdu, size_t cap, size_t* out_l
   st_.bursts_tx++;
   last_emit_ms_ = now_ms;
   return 1;
+}
+
+// Undo the in-flight marking of a burst that never made it onto the wire. The frames are the ones
+// pack_frames just took; putting them back is what lets the next tick retry them immediately instead
+// of waiting for an ack that can never arrive.
+void ArqEngine::cancel_burst() {
+  for (uint32_t seq : burst_frames_)
+    for (auto& it : txq_)
+      if (it.f.seq == seq && it.in_flight) { it.in_flight = false; break; }
+  burst_frames_.clear();
+  st_.pending = txq_.size();
 }
 
 void ArqEngine::note_emitted(size_t frames_in_burst, int64_t now_ms, double airtime_ms) {

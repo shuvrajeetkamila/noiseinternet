@@ -223,7 +223,12 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
       R.throughput_up_bps = up;
       R.throughput_down_bps = down;
     }
-    if (paired && t - t0 > o.max_ms / 2) {
+    // The transfer gets the whole remaining budget. It used to be half of --max-ms, which turned the
+    // harness itself into a loss source: a profile that needs one burst per fragment (the small-FDD
+    // profiles, whose per-frame payload is 14 bytes after the fragment header and AEAD tag) cannot
+    // finish a 70-byte message inside half of a 3 s window, and "timed out" then said nothing about
+    // the modem. The pairing deadline is unchanged.
+    if (paired && t - t0 > o.max_ms - t0) {
       std::ostringstream os;
       os << "transfer timed out at " << (t - t0) << " ms (A done=" << A.done
          << " B done=" << B.done << ", A got " << A.got.size() << " B got " << B.got.size()
@@ -236,7 +241,17 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
     t++;
   }
   R.ok = A.done && B.done && A.hash_ok && B.hash_ok;
-  if (!R.ok && R.error.empty()) R.error = "payload hash mismatch or incomplete transfer";
+  if (!R.ok && R.error.empty()) {
+    std::ostringstream os;
+    os << "payload hash mismatch or incomplete transfer: A got " << A.got.size() << " B got "
+       << B.got.size() << " bytes (expected " << A.bytes_sent_target + 32
+       << " each, 32-byte sha prefix + payload). A done=" << A.done << " hash_ok=" << A.hash_ok
+       << " sha_got=" << A.sha_got.substr(0, 16) << " expected=" << A.sha_expected.substr(0, 16)
+       << " | B done=" << B.done << " hash_ok=" << B.hash_ok << " sha_got="
+       << B.sha_got.substr(0, 16) << " expected=" << B.sha_expected.substr(0, 16) << " | A{ "
+       << A.node->link()->diagnostics_json() << "} B{" << B.node->link()->diagnostics_json() << "}";
+    R.error = os.str();
+  }
   R.throughput_up_bps = 8.0 * (double)A.bytes_sent_target / std::max(0.001, R.seconds);
   R.throughput_down_bps = 8.0 * (double)B.bytes_sent_target / std::max(0.001, R.seconds);
   return R;
