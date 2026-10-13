@@ -531,6 +531,12 @@ int ArqEngine::on_pdu(const uint8_t* pdu, size_t n, int64_t now_ms) {
         }
         if (s == rx_next_) {
           Frame cur = f;
+          // `hold` owns the bytes that cur.payload points at *for as long as the loop needs them*.
+          // Declaring it inside the loop body was a use-after-free: the vector died at the end of an
+          // iteration while the next iteration was still passing its buffer to deliver_data(), which
+          // glibc hid (the freed block kept its contents) and MSVC did not - t_arq passed on Linux
+          // and failed the payload comparison on Windows, with the byte count correct (defect 25).
+          std::vector<uint8_t> hold;
           for (;;) {
             int drc = deliver_data(cur, now_ms);
             if (drc != NI_OK) {
@@ -551,9 +557,9 @@ int ArqEngine::on_pdu(const uint8_t* pdu, size_t n, int64_t now_ms) {
             }
             auto it = ooo_.find(0u);
             if (it == ooo_.end()) break;
-            std::vector<uint8_t> v = std::move(it->second);
+            hold = std::move(it->second);
             ooo_.erase(it);
-            if (ni_frame_decode(v.data(), v.size(), &cur) != NI_OK) break;
+            if (ni_frame_decode(hold.data(), hold.size(), &cur) != NI_OK) break;
           }
         } else {
           ooo_[(uint32_t)(s - rx_next_)] = img;

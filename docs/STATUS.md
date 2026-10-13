@@ -80,12 +80,19 @@ refusal. The simulator shows acks, RTT and retransmits living on the wire (e.g. 
 `reports/RESULTS.md` §4.6, plus four smaller ones in the same path and a receive-side rescan that made the
 simulation too slow to run long enough to see the fix work).
 
-**Measured now** (`reports/raw/linksim.jsonl`, rows `fix-*`; simulated channel, both directions at once, and
-`ok` requires the far end to have reassembled the whole message with a matching SHA-256): 38 B each way on
-FD-LOW-DBPSK in 12.02 s; 228 B in 51.16 s; **2048 B on FD-HIGH-DBPSK in 30.34 s = 540.0 bps (67.5 B/s)**
-and on DBPSK-MID in 29.96 s = 546.9 bps (68.4 B/s). 2 kB on the narrow 82-byte-burst profile still does not
-finish (183 retransmits, 24 frames lost, 294 of 2080 bytes), pairing does not complete at all under
-multipath on FD-LOW, and `ni demo` (the proxy leg) does not pair (defect 21).
+**Measured now** (rows `fix25-*` in `reports/linksim.csv`, from `reports/raw/linksim.jsonl`; simulated
+channel, both directions at once, `ok` requires the far end to have reassembled the whole message with a
+matching SHA-256; median of 3 trials per row, `--max-ms 900000`, so a run that cannot finish grinds for
+15 simulated minutes instead of timing out early - compare rows only against rows measured the same way):
+38 B each way on FD-LOW-DBPSK in 14.8 s (range 12.0-19.4, 3/3 ok); 228 B in 44.2 s (3/3 ok);
+**2048 B on FD-HIGH-DBPSK in 30.34 s = 540.0 bps (67.5 B/s, 3/3 ok)** and on DBPSK-MID in
+29.96 s = 546.9 bps (68.4 B/s, 3/3 ok). These are the post-defect-25 numbers: a use-after-free in the
+out-of-order reassembly path (defects 24-25) was hiding behind exactly this table, and the two headline
+figures did not move when it was fixed. Still failing: 2 kB on the narrow 82-byte-burst profile finished in
+1 trial of 3 (377 s) and not in the other two (1 325 retransmits, 181 frames lost); 2 kB under multipath on
+FD-HIGH finished in 1 trial of 3 (42.3 s); and pairing itself does not complete on FD-LOW with 5 % burst
+loss or with multipath, where the giver sends 1 150 bursts and receives none (defect 26). `ni demo` (the
+proxy leg) does not pair either (defect 21).
 *Not proved:* anything over real speakers and microphones; a multi-kB transfer on every profile; a transfer
 that survives multipath.
 
@@ -149,7 +156,7 @@ question, this table is authoritative.
 |---|---|---|---|
 | A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 8/8 (3 590 assertions) on Linux, and CI now also configures the same core with MSVC 19.51 (7/8 there - `t_arq` fails, defect 24) and compiles it for arm64-v8a/x86_64 with NDK r26 inside the APK build; vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
 | B | PHY transmits arbitrary data over the modelled device chain and it decodes | **PARTIAL** | WAV round-trip sha256-equal; per-profile 7/8 … 0/8; FSK and QAM16/64 fail; no over-the-air data (no hardware) |
-| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **PARTIAL** | **2 048 bytes each way, both directions, SHA-256 verified, in 30.3 s = 540 bps (67.5 B/s) on FD-HIGH-DBPSK and 546.9 bps on DBPSK-MID** over the modelled room at 20-26 dB measured SNR (`reports/linksim.csv`, rows `fix-*`; `RESULTS.md` §4.6 has the root cause of the earlier `delivered 0`). Still failing: 2 kB on the 82-byte-burst profile, any session under multipath, ~10 % of frames to a receiver-side distortion floor (defect 20), and a lost frame wedges the message silently (defect 22). Never attempted over real transducers. |
+| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **PARTIAL** | **2 048 bytes each way, both directions, SHA-256 verified, in 30.3 s = 540 bps (67.5 B/s) on FD-HIGH-DBPSK and 546.9 bps on DBPSK-MID, 3 trials of 3 in both cases** over the modelled room at 20-26 dB measured SNR (`reports/linksim.csv`, rows `fix25-*`; `RESULTS.md` §4.6 has the root cause of the earlier `delivered 0`, defects 24-25 the use-after-free that was hiding in this table's reassembly path). Still failing: 2 kB on the 82-byte-burst profile and under multipath complete in only 1 trial of 3, pairing does not complete on FD-LOW at 5 % burst loss (defect 26), ~10 % of frames go to a receiver-side distortion floor (defect 20), and a lost frame wedges the message silently (defect 22). Never attempted over real transducers. |
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
 | E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | `ni demo` (proxy on 127.0.0.1 + `curl` through it, giver fetches a real URL) runs but never pairs: `giver=wait-response receiver=wait-challenge` on FD-HIGH at three distances, with and without TX pacing - defect 21, a defect in that harness, since `ni linksim` pairs on the same build and profile. No proxied byte has been counted anywhere; no claim of internet sharing is made. |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
@@ -191,7 +198,8 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 0. **Gate G follow-ups.** Install the CI APK on a phone and run the CI EXE on a Windows box with a
    speaker and a microphone: that is the only thing left standing between the current artifacts and
    gates E/F. Also open, and cheap to read: `t_arq` passes on Linux and fails under MSVC (defect 24).
-1. **Gate C, remaining half.** A 2 kB transfer already completes on two profiles; what is left is the
+1. **Gate C, remaining half.** Pairing under loss (defect 26) is the cheapest hard thing left: the counters already say the giver's bursts never arrive, so start from the sim's loss injection, not from the handshake.
+   Next, the 82-byte-profile 2 kB run and multipath, which now each succeed 1 trial in 3 - a retry budget that gives up (defect 22) is plausibly all that separates them. A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver
    (CP-based fine alignment + common-phase-error correction), because `measured_snr_db` saturates near
    26 dB whatever the acoustic SNR is. Then the multipath pairing failure, and per-message abort instead of
