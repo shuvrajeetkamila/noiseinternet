@@ -513,7 +513,10 @@ on purpose. `docs/ADR-001` records the architecture decisions, `docs/STATUS.md` 
 ## 6. Gate G, the platform artifacts, as measured
 
 The Android and Windows halves of this project existed only as source until CI compiled them, so the
-first honest statement about them is the compiler's, not mine. From the green run on this branch:
+first honest statement about them is the compiler's, not mine. The sizes below are from the *first* green
+publish (run `38430714969`, commit `8deef18`); every green push since then rebuilds both files and
+republishes them under the same tag with its own digests in the release body, which is why
+`artifacts/README.md` carries the newer numbers and this section is a dated record.
 
 * `gradle :app:assembleDebug` (AGP 8.5.2, Kotlin 1.9.24, JDK 17, NDK r26): **succeeded**, producing a
   4 093 450-byte debug APK whose contents were checked in the same job -
