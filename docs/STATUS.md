@@ -113,7 +113,7 @@ attempted here.
 *Not proved:* that a real calibration on a real phone+PC pair picks a usable profile, and that the
 adaptation loop tracks a changing room.
 
-### 10. Android and Windows apps, artifacts — **source present, never compiled; no artifacts**
+### 10. Android and Windows apps, artifacts — **built by CI; never run on a device**
 `android/` (Gradle project, Kotlin `NoiseCore`/`PhyTools` bindings, `AudioEngine`, a foreground
 `NoiseService` that also owns a UDP/DNS `VpnService` tunnel, the operator UI) and `windows/` (CMake
 project, WASAPI device enumeration + shared-mode render/capture, a console front end with the same field
@@ -147,13 +147,13 @@ question, this table is authoritative.
 
 | Gate | Criterion being judged | Verdict | Evidence or blocker |
 |---|---|---|---|
-| A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 8/8 (3 590 assertions); vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
+| A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 8/8 (3 590 assertions) on Linux, and CI now also configures the same core with MSVC 19.51 (7/8 there - `t_arq` fails, defect 24) and compiles it for arm64-v8a/x86_64 with NDK r26 inside the APK build; vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
 | B | PHY transmits arbitrary data over the modelled device chain and it decodes | **PARTIAL** | WAV round-trip sha256-equal; per-profile 7/8 … 0/8; FSK and QAM16/64 fail; no over-the-air data (no hardware) |
 | C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **PARTIAL** | **2 048 bytes each way, both directions, SHA-256 verified, in 30.3 s = 540 bps (67.5 B/s) on FD-HIGH-DBPSK and 546.9 bps on DBPSK-MID** over the modelled room at 20-26 dB measured SNR (`reports/linksim.csv`, rows `fix-*`; `RESULTS.md` §4.6 has the root cause of the earlier `delivered 0`). Still failing: 2 kB on the 82-byte-burst profile, any session under multipath, ~10 % of frames to a receiver-side distortion floor (defect 20), and a lost frame wedges the message silently (defect 22). Never attempted over real transducers. |
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
 | E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | `ni demo` (proxy on 127.0.0.1 + `curl` through it, giver fetches a real URL) runs but never pairs: `giver=wait-response receiver=wait-challenge` on FD-HIGH at three distances, with and without TX pacing - defect 21, a defect in that harness, since `ni linksim` pairs on the same build and profile. No proxied byte has been counted anywhere; no claim of internet sharing is made. |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
-| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **FAIL** | the sources exist (`android/`, `windows/`) and the ABI they call is unit-tested, but nothing has been compiled or signed: no JDK/SDK/NDK/MSVC/zig here, so there is no artifact and no tunnel result |
+| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **PARTIAL** | CI builds both from this branch and publishes them as the `ci-build` pre-release: <https://github.com/shuvrajeetkamila/noiseinternet/releases/tag/ci-build>. `noiseinternet-debug.apk` (4 093 450 B) contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 312 B) and its x86_64 twin plus `classes.dex`, i.e. the real NDK-r26 core, debug-signed with a keystore that lived only as long as the runner; `NoiseInternet.exe` (320 512 B) is `PE32+ x86-64` built by MSVC 19.51 with WASAPI compiled in, unsigned. Sizes/sha256 and the exact commands: `artifacts/README.md`. **Still not done: installing or running either on a device, the VpnService tunnel, release signing, and `t_arq` fails under MSVC (7/8 tests pass there)** |
 | H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | `protocol/modulation_profiles.json` now exists and is generated from the C++ table by `ni profiles --json`, so the spec file and the code agree (16 profiles); `reports/bench_sweep.csv`/`.json` and `reports/raw/selftest_snr25_streaming.txt` were re-run after the channel-model rework (defect 19) so the published PHY numbers match the code in this tree. Otherwise this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
 
 ## What is explicitly *not* claimed
@@ -188,6 +188,9 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 
 ## Known gaps and next actions, in the order that unblocks the most
 
+0. **Gate G follow-ups.** Install the CI APK on a phone and run the CI EXE on a Windows box with a
+   speaker and a microphone: that is the only thing left standing between the current artifacts and
+   gates E/F. Also open, and cheap to read: `t_arq` passes on Linux and fails under MSVC (defect 24).
 1. **Gate C, remaining half.** A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver
    (CP-based fine alignment + common-phase-error correction), because `measured_snr_db` saturates near
