@@ -118,6 +118,7 @@ AcousticChannel::AcousticChannel(const ChannelConfig& cfg) : cfg_(cfg) {
   loss_db_ = -20.0 * log10(d / 0.2);
   if (loss_db_ > 0.0) loss_db_ = 0.0;
   if (cfg.air_absorption) loss_db_ -= 0.012 * d * 6.0;  // ~0.12 dB/m at 6 kHz, scaled
+  reset();  // zero the streaming state (see process())
 }
 
 void AcousticChannel::apply_device(const float*, size_t, std::vector<float>*, bool) {}
@@ -137,13 +138,59 @@ void AcousticChannel::noise_only(size_t n, std::vector<float>* out) {
   if (r > 0) ni_scale(&(*out)[0], n, 1.0 / r);
 }
 
+double AcousticChannel::pn_gauss() {
+  // xorshift64* + Box-Muller, with the generator state kept in the object so the noise is a
+  // continuous process across audio blocks. (Re-seeding per block, as this file used to do, made
+  // the "background noise" an identical repeating pattern in every block, which is not noise at
+  // all: a receiver can lock onto it and it also made the measured SNR depend on block size.)
+  pn_s_ ^= pn_s_ >> 12; pn_s_ ^= pn_s_ << 25; pn_s_ ^= pn_s_ >> 27;
+  double u1 = ((double)(pn_s_ * 0x2545F4914F6CDD1Dull) + 1.0) / 1.8446744073709552e19;
+  pn_s_ ^= pn_s_ >> 12; pn_s_ ^= pn_s_ << 25; pn_s_ ^= pn_s_ >> 27;
+  double u2 = ((double)(pn_s_ * 0x2545F4914F6CDD1Dull) + 1.0) / 1.8446744073709552e19;
+  if (u1 < 1e-12) u1 = 1e-12;
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+void AcousticChannel::noise_stream(size_t n, std::vector<float>* out) {
+  // Pink-ish noise (three cascaded one-poles) driven by the persistent generator above, so the
+  // spectrum continues smoothly from one block into the next.
+  out->assign(n, 0.f);
+  for (size_t i = 0; i < n; i++) {
+    double w = pn_gauss();
+    pn_b0_ = 0.997 * pn_b0_ + w * 0.031;
+    pn_b1_ = 0.963 * pn_b1_ + w * 0.124;
+    pn_b2_ = 0.575 * pn_b1_ + w * 0.168;
+    (*out)[i] = (float)(pn_b0_ + pn_b1_ + pn_b2_);
+  }
+  double r = ni_rms(&(*out)[0], n);
+  if (r > 1e-9) ni_scale(&(*out)[0], n, 1.0 / r);  // unit RMS, like noise_only()
+}
+
+void AcousticChannel::reset() {
+  for (auto& bq : spk_) bq.reset();
+  for (auto& bq : mic_) bq.reset();
+  mp_tail_.clear();
+  hist3_.clear();
+  absorb_acc_ = 0.0;
+  agc_gain_ = 1.0;
+  agc_env_ = 1e-9;
+  sig_level_ = 1e-9;
+  sro_pos_ = 0.0;
+  pn_b0_ = pn_b1_ = pn_b2_ = 0.0;
+  pn_s_ = cfg_.seed ? (uint64_t)cfg_.seed * 0x9E3779B97F4A7C15ull : 0x9E3779B97F4A7C15ull;
+  if (pn_s_ == 0) pn_s_ = 0x1234567u;
+}
+
 void AcousticChannel::process(const float* in, size_t n, std::vector<float>* out) {
+  if (pn_s_ == 0) reset();
   std::vector<float> a(in, in + n), b(n);
   double txg = pow(10.0, cfg_.tx_level_db / 20.0);
   for (size_t i = 0; i < n; i++) a[i] = (float)(a[i] * txg);
 
+  // Loudspeaker response. Deliberately NOT reset per block: the ring/box resonances and the
+  // high-pass corner are continuous in time, and re-zeroing them at a callback boundary stamps a
+  // transient into the first ~ms of every block.
   for (auto& bq : spk_) {
-    bq.reset();
     ni_biquad_run(&bq, &a[0], n, &b[0]);
     a.swap(b);
   }
@@ -159,56 +206,93 @@ void AcousticChannel::process(const float* in, size_t n, std::vector<float>* out
   for (size_t i = 0; i < n; i++) a[i] = (float)(a[i] * g);
 
   if (cfg_.multipath) {
-    std::vector<float> y(n, 0.f);
-    // direct path
-    for (size_t i = 0; i < n; i++) y[i] += a[i];
+    int dmax = 0;
     for (int r = 0; r < cfg_.n_reflections && r < 4; r++) {
       if (cfg_.refl_db[r] == 0.0 && cfg_.refl_delay_ms[r] == 0.0) continue;
-      size_t dd = (size_t)(cfg_.refl_delay_ms[r] * 1e-3 * cfg_.fs);
-      double gg = pow(10.0, cfg_.refl_db[r] / 20.0);
-      for (size_t i = dd; i < n; i++) y[i] += (float)(a[i - dd] * gg);
+      int dd = (int)(cfg_.refl_delay_ms[r] * 1e-3 * cfg_.fs);
+      if (dd > dmax) dmax = dd;
     }
-    a.swap(y);
+    if (dmax > 0) {
+      // A reflection may arrive from audio that was played before this block started, so keep the
+      // last `dmax` samples of the dry signal as history. Without it the first `dmax` samples of
+      // every block lose their echoes, which is a discontinuity in the middle of a burst.
+      std::vector<float> ext;
+      ext.reserve(mp_tail_.size() + n);
+      ext.insert(ext.end(), mp_tail_.begin(), mp_tail_.end());
+      ext.insert(ext.end(), a.begin(), a.end());
+      size_t off = mp_tail_.size();
+      std::vector<float> y(n, 0.f);
+      for (size_t i = 0; i < n; i++) y[i] += ext[off + i];
+      for (int r = 0; r < cfg_.n_reflections && r < 4; r++) {
+        if (cfg_.refl_db[r] == 0.0 && cfg_.refl_delay_ms[r] == 0.0) continue;
+        size_t dd = (size_t)(cfg_.refl_delay_ms[r] * 1e-3 * cfg_.fs);
+        double gg = pow(10.0, cfg_.refl_db[r] / 20.0);
+        for (size_t i = 0; i < n; i++) {
+          size_t idx = off + i;
+          if (idx >= dd) y[i] += (float)(ext[idx - dd] * gg);
+        }
+      }
+      mp_tail_.assign(a.end() - (size_t)dmax, a.end());
+      a.swap(y);
+    }
   }
   if (cfg_.air_absorption && cfg_.distance_m > 0.5) {
-    // distance-dependent HF absorption as a one-pole lowpass
+    // distance-dependent HF absorption as a one-pole lowpass, state kept across blocks
     double fc = 16000.0 / (1.0 + 0.35 * (cfg_.distance_m - 0.5));
     if (fc < 2500) fc = 2500;
     if (fc > 0.45 * cfg_.fs) fc = 0.45 * cfg_.fs;
     double k = exp(-2.0 * M_PI * fc / cfg_.fs);
-    double acc = 0;
+    double acc = absorb_acc_;
     for (size_t i = 0; i < n; i++) {
       acc = k * acc + (1.0 - k) * a[i];
       a[i] = (float)(acc / (1.0 - k * k + 1e-9) * (1.0 - k));
     }
+    absorb_acc_ = acc;
   }
   for (auto& bq : mic_) {
-    bq.reset();
     ni_biquad_run(&bq, &a[0], n, &b[0]);
     a.swap(b);
   }
 
-  // OS AGC + noise gate: a slow envelope loop that normalises loud passages and can mute quiet
-  // bursts. This is the single most common reason an acoustic modem "works on the bench and
-  // dies in the field", so it is on by default in the model.
-  double sig_rms = ni_rms(&a[0], n);
+  // ---- background noise ----------------------------------------------------
+  // Added HERE, i.e. acoustically in front of the microphone, so the OS AGC below amplifies signal
+  // and noise together and cannot change the in-band SNR. It used to be added after the AGC and
+  // scaled by the RMS of the current block, which (a) made `--snr` a lie (a block that was mostly
+  // silence got almost no noise, a loud block got a lot) and (b) left the noise level swinging at
+  // block boundaries in the middle of a burst.
+  double blk = ni_rms(&a[0], n);
+  double alpha = 1.0 - exp(-(double)n / (48000.0 * 1.0));  // ~1 s time constant
+  sig_level_ += alpha * (blk - sig_level_);
+  if (sig_level_ < 1e-9) sig_level_ = 1e-9;
+  std::vector<float> nz;
+  noise_stream(n, &nz);
+  double nrms = cfg_.noise_rms >= 0.0 ? cfg_.noise_rms
+                                      : sig_level_ * pow(10.0, -cfg_.snr_db / 20.0);
+  if (nrms > 0) {
+    for (size_t i = 0; i < n; i++) a[i] = (float)(a[i] + nz[i] * nrms);
+  }
+
+  // ---- OS AGC + noise gate -------------------------------------------------
+  // A realistic OS automatic gain control: slow attack, slower release, and a noise gate that
+  // slams down when the input is quiet. This is the single most common reason an acoustic modem
+  // "works on the bench and dies in the field", so it is on by default in the model. The loop is
+  // continuous across blocks (agc_gain_/agc_env_ are members): the gain the burst sees must not
+  // depend on where the harness cut the stream.
+  //
+  // The time constants matter more than the target level: with a ~20 ms loop the gain moved 60 %
+  // *inside one OFDM symbol*, which is not a channel an OFDM receiver can equalise - every
+  // subcarrier rotates relative to its neighbours and orthogonality is gone. Real AGCs are 100 ms
+  // or slower, so a burst sees a near-constant gain, and what kills modems in the field is the
+  // gate, modelled below. Set agc_fast (or --fast-agc on the CLI) to reproduce the pathological
+  // case; `ni selftest --fast-agc` fails for exactly that reason.
   if (cfg_.agc) {
-    // A realistic OS automatic gain control: slow attack, slower release, and a noise gate that
-    // slams down when the input is quiet. The time constants matter more than the target level:
-    // with a ~20 ms loop (an earlier revision here) the gain moved 60% *inside one OFDM symbol*,
-    // which is not a channel an OFDM receiver can equalise - every subcarrier rotates relative to
-    // its neighbours and orthogonality is gone. Real AGCs are 100 ms+, so the burst sees a
-    // near-constant gain, and what actually kills modems in the field is the gate, modelled
-    // below. Set agc_fast (or --fast-agc on the CLI) to reproduce the pathological case and see
-    // the measured difference; `ni selftest --fast-agc` fails for exactly that reason.
     double gate_lin = pow(10.0, gate_dbfs_ / 20.0);
-    double gain = 1.0;
+    double gain = agc_gain_;
     double target = 0.12;
-    double a_tau = cfg_.agc_fast ? 0.0 : 0.995;  // per-sample pole (0.995 -> 200 ms at 48 kHz)
-    double r_tau = cfg_.agc_fast ? 0.0 : 0.9992;  // release ~ 600 ms
-    if (cfg_.agc_fast) { a_tau = 0.999; r_tau = 0.9998; }
+    double a_tau = cfg_.agc_fast ? 0.999 : 0.995;   // per-sample pole (0.995 -> 200 ms at 48 kHz)
+    double r_tau = cfg_.agc_fast ? 0.9998 : 0.9992;  // release ~ 600 ms
+    double env = agc_env_ > blk ? agc_env_ : blk;
     std::vector<float> y(n);
-    double env = sig_rms > 1e-9 ? sig_rms : 1e-9;
     for (size_t i = 0; i < n; i++) {
       double x = a[i];
       double aa = fabs(x);
@@ -224,34 +308,29 @@ void AcousticChannel::process(const float* in, size_t n, std::vector<float>* out
       if (env < gate_lin) g2 *= 0.1;  // gate slams down on quiet input
       y[i] = (float)(x * g2);
     }
+    agc_gain_ = gain;
+    agc_env_ = env;
     a.swap(y);
   }
 
-  // additive noise to hit the requested in-band SNR (or an absolute level)
-  std::vector<float> nz;
-  noise_only(n, &nz);
-  double cur = ni_rms(&a[0], n);
-  double nrms;
-  if (cfg_.noise_rms >= 0.0)
-    nrms = cfg_.noise_rms;
-  else
-    nrms = cur * pow(10.0, -cfg_.snr_db / 20.0);
-  if (nrms > 0) {
-    double s = nrms;  // noise_only is unit-RMS
-    for (size_t i = 0; i < n; i++) a[i] = (float)(a[i] + nz[i] * s);
-  }
-
-  // sample-rate offset between the two sound cards
+  // sample-rate offset between the two sound cards. Continuous across blocks: the read position is
+  // carried in sro_pos_ and the interpolator's left taps come from hist3_, otherwise every block
+  // boundary would be a resampling discontinuity.
   if (fabs(cfg_.sro_ppm) > 0.01) {
     double ratio = 1.0 + cfg_.sro_ppm * 1e-6;
-    size_t m = (size_t)((double)n / ratio);
+    std::vector<float> ext;
+    ext.insert(ext.end(), hist3_.begin(), hist3_.end());
+    ext.insert(ext.end(), a.begin(), a.end());
+    size_t h = hist3_.size();
+    double span = (double)(h + n) / ratio - sro_pos_;
+    size_t m = span > 0.0 ? (size_t)span : 0;
     std::vector<float> y(m);
     for (size_t i = 0; i < m; i++) {
-      double src = (double)i * ratio;
+      double src = sro_pos_ + (double)i * ratio;
       size_t i0 = (size_t)src;
       double fr = src - (double)i0;
-      float v0 = i0 > 0 ? a[i0 - 1] : 0.f, v1 = a[std::min(i0, n - 1)],
-            v2 = a[std::min(i0 + 1, n - 1)], v3 = a[std::min(i0 + 2, n - 1)];
+      float v0 = i0 > 0 ? ext[i0 - 1] : 0.f, v1 = ext[std::min(i0, ext.size() - 1)],
+            v2 = ext[std::min(i0 + 1, ext.size() - 1)], v3 = ext[std::min(i0 + 2, ext.size() - 1)];
       // Catmull-Rom
       double c0 = v1;
       double c1 = 0.5 * (v2 - v0);
@@ -259,6 +338,9 @@ void AcousticChannel::process(const float* in, size_t n, std::vector<float>* out
       double c3 = 0.5 * (v3 - v0) + 1.5 * (v1 - v2);
       y[i] = (float)((c3 * fr + c2) * fr * fr + c1 * fr + c0);
     }
+    sro_pos_ += (double)m * ratio - (double)(h + n);
+    if (sro_pos_ < 0.0) sro_pos_ = 0.0;
+    hist3_.assign(a.end() - std::min<size_t>(3, a.size()), a.end());
     a.swap(y);
   }
 

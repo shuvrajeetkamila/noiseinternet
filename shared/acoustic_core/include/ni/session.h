@@ -322,6 +322,10 @@ class AcousticLink {
   double noise_rms_ = 1e-4;  // learned receive noise floor, for the detector squelch
   bool mid_burst_ = false;   // a burst is arriving: keep the detector running every callback
   int64_t burst_hold_ms_ = 0;
+  // Index inside cap_ where the burst we are waiting for begins. Once the detector has found the
+  // sync pair we do not run the detector again per callback (it is O(window x symbol)); we decode
+  // from this fixed offset, which aborts cheaply while the burst is still arriving.
+  size_t burst_start_ = 0;
   int state_ = NI_ST_IDLE;
   bool running_ = false;
   std::string last_error_;

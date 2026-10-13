@@ -42,6 +42,11 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
   }
   const double fs = o.fs;
   const int per_ms = (int)(fs / 1000.0);
+  // Virtual time is pumped in 10 ms blocks, which is the size of a real Android/Linux audio
+  // callback (1 ms callbacks are not what a phone delivers, and they made the receive path do
+  // 10x the work it needs to). The half-duplex turnaround (40 ms) and every ARQ timer are far
+  // coarser than this, so the model does not depend on the block size.
+  const int blk_ms = 10;
 
   auto mk = [&](Role role, bool master, int profile, const char* name) {
     NodeConfig c;
@@ -92,10 +97,15 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
     return R;
   }
 
+  // The test message may be any size: the ARQ fragments it across bursts and reassembles it at the
+  // far end. What has to exist at all is room for ONE fragment inside one burst, i.e. the profile's
+  // per-burst PDU capacity minus the frame header, the fragment header and the AEAD tag. This used
+  // to clamp the whole message to that size, which made every "can it move more than one burst?"
+  // question unaskable - the harness, not the modem, was the limit.
   int maxpay = std::min(A.node->link()->modemp()->max_payload(),
                         B.node->link()->modemp()->max_payload()) - 44;
-  int pb = std::min(o.payload_bytes, maxpay);
-  if (pb < 16) {
+  int pb = o.payload_bytes;
+  if (maxpay < 16) {
     R.error = "profile cannot carry a useful test payload at this sample rate";
     return R;
   }
@@ -162,7 +172,7 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
     // drain both playback paths into the (modelled) wire
     for (int which = 0; which < 2; which++) {
       Side& s = which ? B : A;
-      int got = s.node->pull_playback(buf, per_ms);
+      int got = s.node->pull_playback(buf, (size_t)per_ms * (size_t)blk_ms);
       if (got > 0) {
         bool drop = o.burst_loss_prob > 0 && jitter.uniform() < o.burst_loss_prob;
         if (!drop) {
@@ -238,7 +248,7 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
       R.error = os.str();
       return R;
     }
-    t++;
+    t += blk_ms;
   }
   R.ok = A.done && B.done && A.hash_ok && B.hash_ok;
   if (!R.ok && R.error.empty()) {

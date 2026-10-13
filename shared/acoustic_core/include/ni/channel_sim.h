@@ -9,6 +9,7 @@
 // stack applies AGC that will happily mute a low-level modem burst.
 #ifndef NI_CHANNEL_SIM_H
 #define NI_CHANNEL_SIM_H
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "ni/common.h"
@@ -72,9 +73,14 @@ struct ChannelConfig {
 class AcousticChannel {
  public:
   explicit AcousticChannel(const ChannelConfig& cfg);
-  // Processes a whole transmitted burst; output length may differ from n because of the
-  // resampling needed for sample-rate offset and filter latency.
+  // Processes a block of transmitted audio. The channel is a *streaming* model: every filter,
+  // envelope and noise generator keeps its state between calls, so the result does not depend on
+  // where the caller's audio-callback boundaries happen to fall. `out` can be slightly shorter or
+  // longer than `n` because of the sample-rate-offset resampler.
   void process(const float* in, size_t n, std::vector<float>* out);
+  // Clear all streaming state (new session / new test). Without this the previous run's filter
+  // and AGC state would leak into the next.
+  void reset();
   double path_loss_db() const { return loss_db_; }
   std::string describe() const;
   const ChannelConfig& config() const { return cfg_; }
@@ -88,6 +94,18 @@ class AcousticChannel {
   std::vector<Biquad> spk_, mic_;
   double hf_slope_db_at_20k_ = 0.0;
   double gate_dbfs_ = -70.0;
+  // ---- streaming state (see process()) ----
+  std::vector<float> mp_tail_;   // pre-multipath samples before the current block
+  std::vector<float> hist3_;     // interpolator history for the SRO resampler
+  double absorb_acc_ = 0.0;      // one-pole HF absorption memory
+  double agc_gain_ = 1.0;        // AGC loop gain, persists across blocks
+  double agc_env_ = 1e-9;        // AGC envelope
+  double sig_level_ = 1e-9;      // long-term signal RMS: what the SNR target is referred to
+  double sro_pos_ = 0.0;         // continuous read position through the resampled stream
+  double pn_b0_ = 0.0, pn_b1_ = 0.0, pn_b2_ = 0.0;  // pink-noise generator state
+  uint64_t pn_s_ = 0;            // noise RNG state; 0 means "not initialised yet"
+  double pn_gauss();
+  void noise_stream(size_t n, std::vector<float>* out);
 };
 
 // Convenience: full path render->channel->decode, used by every PHY benchmark. Returns

@@ -788,11 +788,15 @@ struct Pump {
   int64_t* t;
   Pump(Node* a, Node* b, double f, int64_t* tt) : giver(a), recv(b), fs(f), buf(65536), t(tt) {}
   void step(int64_t until_ms) {
+    // 10 ms pump blocks: that is what an audio callback actually delivers on Android and Windows,
+    // and pumping 1 ms at a time makes the harness (not the modem) the bottleneck. Same reasoning
+    // as run_link_sim(), where the change is documented.
+    const int blk_ms = 10;
     while (*t < until_ms) {
-      (*t)++;
+      *t += blk_ms;
       giver->step(*t);
       recv->step(*t);
-      size_t want = (size_t)(fs / 1000.0) + 1;
+      size_t want = (size_t)(fs / 1000.0) * blk_ms + 1;
       buf.resize(want);
       int g = giver->pull_playback(&buf[0], want);
       if (g > 0) r2g.insert(r2g.end(), buf.begin(), buf.begin() + g);
@@ -911,6 +915,11 @@ int cmd_demo(const Opts& o) {
             recv.last_error().c_str());
     return 1;
   }
+  // Same half-duplex pacing the link simulator uses: a node must stop feeding the sound card when
+  // it has nothing to send, otherwise its bursts queue up back-to-back and the peer's reply window
+  // (which is derived from the measured airtime) no longer lines up with the wire.
+  giver.set_pace_tx(true);
+  recv.set_pace_tx(true);
   int64_t t = 0;
   Pump p2(&giver, &recv, fs, &t);
   bool paired = false;

@@ -706,6 +706,11 @@ int Modem::rx_capture(const float* x, size_t n, RxResult* out) const {
     return rc;
   }
   out->cfo = ni_cfo_estimate(fft_, x, n, sr.pos, map_.k0, map_.k1, cfg_.sample_rate, cp_);
+  // Report the burst position on EVERY path, including the "burst still arriving" NI_ERR_SHORT
+  // return inside rx_decode (which bails out before it gets to set it). The link layer front-trims
+  // its capture window to this index, which is what turns the arrival-wait loop from a rescan of
+  // the whole 1.2 s window per callback into a decode that starts where the burst starts.
+  out->start_pos = sr.pos;
   rc = rx_decode(x, n, sr.pos, out);
   out->stats.sync_peak = sr.peak;
   out->stats.cfo_hz = out->cfo;

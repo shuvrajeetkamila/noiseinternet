@@ -14,8 +14,8 @@ hardware or app artifact anywhere in this workspace.
 | Word | Means here |
 |---|---|
 | **built** | source compiles into `libni_core.a` / the `ni` CLI with `-Wall -Wextra`, zero warnings suppressed by deleting the check |
-| **unit-tested** | a test in `shared/acoustic_core/tests/` asserts it, run by `ctest`, currently 7/7 green, 3 557 assertions |
-| **self-tested** | exercised by `ni selftest` / `ni phy test` / `ni linksim` on the modelled device chain: modem → room/impulse response → noise → AGC → quantiser → demodulator, all in software |
+| **unit-tested** | a test in `shared/acoustic_core/tests/` asserts it, run by `ctest`, currently 8/8 green, 3 590 assertions |
+| **self-tested** | exercised by `ni selftest` / `ni bench` / `ni linksim` on the modelled device chain: modem → room/impulse response → noise → AGC → quantiser → demodulator, all in software |
 | **measured** | a number this host printed during a real run, saved under `reports/raw/` |
 | **proved** | the acceptance criterion is met by evidence |
 | **not proved** | code exists and may well work; nothing here demonstrates it |
@@ -74,11 +74,20 @@ device in the same room with real acoustic eavesdropping.
 acks, retransmit-until-give-up, best-effort frame release, AEAD-tamper refusal and unpaired-plaintext
 refusal. The simulator shows acks, RTT and retransmits living on the wire (e.g. `acks_sent 39`,
 `retransmits 37`, `lost_frames 5` in the DBPSK-WIDE run).
-**The gap:** across 16 trials on 8 configurations (profiles 2/3/5/11, SNR 25 and 35 dB, paced and
-`--unpaced`) every run ended `delivered 0` with `A got 0 B got 0`; `reports/linksim.csv` is all
-`ok = 0`. The three open suspects, and why they are plausible, are recorded in `reports/RESULTS.md` §4.
-So: an ARQ engine that is correct against its own tests, on a link that does not yet carry a message.
-*Not proved:* payload transfer through the full `Node` + PCM path, in either direction.
+**The gap was real and it was ours, not the radio's:** every earlier run ended `delivered 0` because
+`ArqConfig::max_burst_bytes` let the ARQ fill a burst with more bytes than one FD-LOW burst can carry,
+`Modem::tx_render` refused it, and `render_burst` returned without saying so (defect 18 in
+`reports/RESULTS.md` §4.6, plus four smaller ones in the same path and a receive-side rescan that made the
+simulation too slow to run long enough to see the fix work).
+
+**Measured now** (`reports/raw/linksim.jsonl`, rows `fix-*`; simulated channel, both directions at once, and
+`ok` requires the far end to have reassembled the whole message with a matching SHA-256): 38 B each way on
+FD-LOW-DBPSK in 12.02 s; 228 B in 51.16 s; **2048 B on FD-HIGH-DBPSK in 30.34 s = 540.0 bps (67.5 B/s)**
+and on DBPSK-MID in 29.96 s = 546.9 bps (68.4 B/s). 2 kB on the narrow 82-byte-burst profile still does not
+finish (183 retransmits, 24 frames lost, 294 of 2080 bytes), pairing does not complete at all under
+multipath on FD-LOW, and `ni demo` (the proxy leg) does not pair (defect 21).
+*Not proved:* anything over real speakers and microphones; a multi-kB transfer on every profile; a transfer
+that survives multipath.
 
 ### 7. Local HTTP/CONNECT proxy — **not proved**
 `proxy.cpp` implements a loopback-only proxy (127.0.0.1, `Proxy-Authorization: Noise <token>`), request
@@ -138,14 +147,14 @@ question, this table is authoritative.
 
 | Gate | Criterion being judged | Verdict | Evidence or blocker |
 |---|---|---|---|
-| A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 7/7; vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
+| A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 8/8 (3 590 assertions); vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
 | B | PHY transmits arbitrary data over the modelled device chain and it decodes | **PARTIAL** | WAV round-trip sha256-equal; per-profile 7/8 … 0/8; FSK and QAM16/64 fail; no over-the-air data (no hardware) |
-| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **FAIL** | pairing completes, acks/RTT/retransmits live, but `delivered 0` in 17/17 trials; `reports/linksim.csv`. New lead: the same profile decodes 100 % of single bursts in `ni bench` while a two-node session delivers nothing, and `Node::pull_playback` applies the channel model to whole accumulated transmit blocks - `RESULTS.md` section 4.6 |
+| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **PARTIAL** | **2 048 bytes each way, both directions, SHA-256 verified, in 30.3 s = 540 bps (67.5 B/s) on FD-HIGH-DBPSK and 546.9 bps on DBPSK-MID** over the modelled room at 20-26 dB measured SNR (`reports/linksim.csv`, rows `fix-*`; `RESULTS.md` §4.6 has the root cause of the earlier `delivered 0`). Still failing: 2 kB on the 82-byte-burst profile, any session under multipath, ~10 % of frames to a receiver-side distortion floor (defect 20), and a lost frame wedges the message silently (defect 22). Never attempted over real transducers. |
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
-| E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | never attempted end-to-end; blocked by gate C. No external host was contacted from this sandbox |
+| E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | `ni demo` (proxy on 127.0.0.1 + `curl` through it, giver fetches a real URL) runs but never pairs: `giver=wait-response receiver=wait-challenge` on FD-HIGH at three distances, with and without TX pacing - defect 21, a defect in that harness, since `ni linksim` pairs on the same build and profile. No proxied byte has been counted anywhere; no claim of internet sharing is made. |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
 | G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **FAIL** | the sources exist (`android/`, `windows/`) and the ABI they call is unit-tested, but nothing has been compiled or signed: no JDK/SDK/NDK/MSVC/zig here, so there is no artifact and no tunnel result |
-| H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
+| H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | `protocol/modulation_profiles.json` now exists and is generated from the C++ table by `ni profiles --json`, so the spec file and the code agree (16 profiles); `reports/bench_sweep.csv`/`.json` and `reports/raw/selftest_snr25_streaming.txt` were re-run after the channel-model rework (defect 19) so the published PHY numbers match the code in this tree. Otherwise this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
 
 ## What is explicitly *not* claimed
 
@@ -179,15 +188,19 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 
 ## Known gaps and next actions, in the order that unblocks the most
 
-1. **Gate C.** Get one 228-byte message across `ni linksim`. Work the three suspects in `RESULTS.md` §4:
-   achievable demod SNR through the device model (measured −14 … −45 dB at nominal 35 dB), the
-   turnaround/listen window, and `modem.cpp:426` ignoring the descriptor's modulation id.
+1. **Gate C, remaining half.** A 2 kB transfer already completes on two profiles; what is left is the
+   ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver
+   (CP-based fine alignment + common-phase-error correction), because `measured_snr_db` saturates near
+   26 dB whatever the acoustic SNR is. Then the multipath pairing failure, and per-message abort instead of
+   a silent wedge (defect 22).
 2. One command to regenerate the evidence: `ni bench` already writes CSV + JSON by itself, and
    `scripts/raw_to_csv.py` converts the self-test/linksim logs, but `ni selftest` / `ni calibrate` still
    need `tee`, and there is no wrapper that runs all of them and no CI job. Add `scripts/run_benchmarks.sh`.
-3. **Fix the simulator's channel application before anything else on gate C**: apply the model per burst
-   with a guard interval instead of to whole accumulated transmit blocks (`Node::pull_playback`), because
-   `ni bench` proves the same profile is error-free burst-by-burst at the SNR linksim reports.
+3. ~~Fix the simulator's channel application before anything else on gate C~~ **done**: the model is now
+   streaming (persistent filter/AGC/noise state, noise in front of the AGC, continuous SRO resampling) and
+   `feed_pcm` no longer rescans its window per callback (`RESULTS.md` items 19 and 19b). The
+   "guard interval per burst" idea is *not* what was done and the earlier measurement showed it breaks
+   pairing; what mattered was removing the per-block re-initialisation.
 4. `protocol/modulation_profiles.json` has drifted from the C++ table: it is missing the `cp` field and
    ids 14/15, so the spec file and the firmware disagree. Generate it from the code or add a test that
    diffs them.

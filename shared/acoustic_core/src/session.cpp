@@ -177,19 +177,37 @@ int AcousticLink::feed_pcm(const float* x, size_t n) {
     noise_rms_ = 0.2 * noise_rms_ + 0.8 * new_rms;   // noise floor falls fast
   else
     noise_rms_ = 0.9999 * noise_rms_ + 0.0001 * new_rms;  // and rises only slowly
-  if (mid_burst_ && now_ms_ - burst_hold_ms_ > 400) mid_burst_ = false;
+  if (mid_burst_ && now_ms_ - burst_hold_ms_ > 400) { mid_burst_ = false; burst_start_ = 0; }
   Modem* demod = opt_.duplex == 1 && modem_alt_ ? modem_alt_ : modem_;
   RxResult r;
   if (cap_.size() < (size_t)(2 * (NI_N_FFT + modem_->cp())) ||
       (!mid_burst_ && new_rms < std::max(2e-4, noise_rms_ * 3.0)))
     return NI_ERR_NOFRAME;  // squelched: nothing to detect in this block
-  int rc = demod->rx_capture(&cap_[0], cap_.size(), &r);
+  int rc;
+  if (mid_burst_ && burst_start_ < cap_.size()) {
+    // We already know where this burst starts, so skip the detector: rx_decode reads the sync and
+    // descriptor and returns NI_ERR_SHORT as soon as a symbol is missing, which costs a handful of
+    // FFTs instead of a full correlation scan of the window.
+    rc = demod->rx_decode(&cap_[0], cap_.size(), burst_start_, &r);
+  } else {
+    burst_start_ = 0;
+    rc = demod->rx_capture(&cap_[0], cap_.size(), &r);
+  }
   if (rc == NI_ERR_SHORT) {
+    // Burst found but not fully received: keep it from its sync symbol onwards. That bounds the
+    // work of every later callback AND stops the "newest 1.2 s" trim above from cutting the head
+    // off a burst that is still arriving.
     mid_burst_ = true;
     burst_hold_ms_ = now_ms_;
-  } else if (rc == NI_ERR_NOFRAME)
-    mid_burst_ = false;
-  if (rc == NI_ERR_SHORT) return rc;  // burst still arriving; try again on the next feed
+    size_t head = r.start_pos > burst_start_ ? r.start_pos : burst_start_;
+    if (head > 0 && head <= cap_.size()) {
+      cap_.erase(cap_.begin(), cap_.begin() + head);
+      burst_start_ = 0;
+    }
+    return rc;  // burst still arriving; try again on the next feed
+  }
+  mid_burst_ = false;
+  burst_start_ = 0;
   if (rc == NI_ERR_NOFRAME) {
     c_.rx_no_frame++;
     if (cap_.size() > keep) cap_.erase(cap_.begin(), cap_.begin() + (cap_.size() - keep));
