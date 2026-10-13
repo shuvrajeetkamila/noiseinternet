@@ -9,8 +9,12 @@ Release page (assets, manifest, caveats):
 
 | file | bytes | sha256 | what it is |
 |---|---|---|---|
-| `noiseinternet-debug.apk` | 4 093 450 | `edb852dad3f647434489dc5ae80ef07990741329b3bc93e480857f70dd0d6152` | Android app, `com.noiseinternet.app`, minSdk 23. Contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 312 B) and `lib/x86_64/libnoiseinternet_jni.so` (317 144 B) - the shared core, compiled by NDK r26 - plus `classes.dex` (2 313 184 B). Signed with a **debug** keystore created on the runner and destroyed with it: installable with `adb install`, not a release signature, not a Play Store publication. |
-| `NoiseInternet.exe` | 320 512 | `8557d4f823ecc2f03e17f4be5a2b6c11a19ee5bb0d112ed34bdd5709f96d708c` | `PE32+ executable (console) x86-64, for MS Windows, 6 sections`, built by MSVC 19.51 with the WASAPI backend compiled in (`NI_WITH_WASAPI`). **Unsigned**, so SmartScreen will warn - nothing vouches for the binary except this repository and the build log. |
+| `noiseinternet-debug.apk` | 4 093 453 | `f4218e77c3aa7675c5e80db64a97c0a838e4137c53de97ba585e400e60352b26` | Android app, `com.noiseinternet.app`, minSdk 23. Contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 344 B) and `lib/x86_64/libnoiseinternet_jni.so` (317 144 B) - the shared core, compiled by NDK r26 - plus `classes.dex` (2 313 188 B). Signed with a **debug** keystore created on the runner and destroyed with it: installable with `adb install`, not a release signature, not a Play Store publication. |
+| `NoiseInternet.exe` | 321 024 | `d01405a5f7cd0566fcf6e0b1c18261882382604992a1d3143cb676f30feb5f67` | `PE32+ executable (console) x86-64, for MS Windows, 6 sections`, built by MSVC 19.51 with the WASAPI backend compiled in (`NI_WITH_WASAPI`). **Unsigned**, so SmartScreen will warn - nothing vouches for the binary except this repository and the build log. |
+
+The two rows above are the build of commit `3a62a12` (the ARQ use-after-free fix) from run
+`38433690376`; every push that goes green republishes both files under the same tag, so the release body
+carries the current numbers and this table is the one that needs editing when the code changes size.
 
 Both come from `.github/workflows/build.yml`, and the release job only runs when the Android and
 Windows jobs are green: the APK step fails if the native library is missing from the archive, the EXE
