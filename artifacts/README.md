@@ -12,9 +12,13 @@ Release page (assets, manifest, caveats):
 | `noiseinternet-debug.apk` | 4 093 453 | `f4218e77c3aa7675c5e80db64a97c0a838e4137c53de97ba585e400e60352b26` | Android app, `com.noiseinternet.app`, minSdk 23. Contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 344 B) and `lib/x86_64/libnoiseinternet_jni.so` (317 144 B) - the shared core, compiled by NDK r26 - plus `classes.dex` (2 313 188 B). Signed with a **debug** keystore created on the runner and destroyed with it: installable with `adb install`, not a release signature, not a Play Store publication. |
 | `NoiseInternet.exe` | 321 024 | `d01405a5f7cd0566fcf6e0b1c18261882382604992a1d3143cb676f30feb5f67` | `PE32+ executable (console) x86-64, for MS Windows, 6 sections`, built by MSVC 19.51 with the WASAPI backend compiled in (`NI_WITH_WASAPI`). **Unsigned**, so SmartScreen will warn - nothing vouches for the binary except this repository and the build log. |
 
-The two rows above are the build of commit `3a62a12` (the ARQ use-after-free fix) from run
-`38433690376`; every push that goes green republishes both files under the same tag, so the release body
-carries the current numbers and this table is the one that needs editing when the code changes size.
+**Read the hashes below as an example, not as the current truth.** Every green push republishes both
+files under this tag, and the rebuild is not byte-reproducible: the debug keystore is generated fresh on
+each runner, so the APK's signature bytes change even when only a `.md` file did (4 093 453 B at
+`3a62a12`, 4 093 460 B at `683b2c4`), and the same C++ compiled twice by MSVC came out at the same
+321 024 B with a different sha256. The manifest in the release body is generated on the runner from the
+bytes it is publishing, so that - not this table - is what to verify a download against
+(`sha256sum` on your copy, compare with the release page).
 
 Both come from `.github/workflows/build.yml`, and the release job only runs when the Android and
 Windows jobs are green: the APK step fails if the native library is missing from the archive, the EXE
@@ -38,8 +42,13 @@ description of intentions.
   (defects 24-25 in `reports/RESULTS.md`). The run that published these files is the run that went green
   after the fix - so the Windows artifact is "compiles, and the unit suites pass", which is still not
   "tested on a sound card".
-* `lint`, `assembleRelease`, and any device install were never exercised on the Android side beyond
+  * `lint`, `assembleRelease`, and any device install were never exercised on the Android side beyond
   `assembleDebug`.
+* **These binaries are not reproducible builds.** Nothing in this repository claims otherwise: the debug
+  signing key is per-run and no source-date-date-normalisation is set up, so a hash pins a *download*, not
+  a build. Verifying a binary means checking it against the manifest published with it, or rebuilding from
+  the commands below and accepting that the output will differ byte-for-byte from the asset while the
+  compiled code paths are the same.
 
 ## Building them yourself
 

@@ -533,6 +533,11 @@ republishes them under the same tag with its own digests in the release body, wh
   `addAllowedApplication`/`protect(fd)`). Each is described in the commit that fixed it, because
   "the source compiles" was the claim this repository could not previously make, and the way it
   turned out to be wrong is the interesting part.
+* The two builds of the same tree published minutes apart came out at 4 093 453 B and 4 093 460 B for the
+  APK, and the EXE at an identical 321 024 B with a different sha256. That is not a defect in the modem,
+  it is debug signing plus an unnormalised build date, and it is recorded here because "download hash X"
+  is a claim that has to survive the next push: the per-run manifest in the release body is the thing that
+  is true of a given file, and this project does not do reproducible builds.
 * What the artifacts are NOT: they have never touched a sound card or a microphone, they have never
   been installed on a phone, and the proxy/tunnel legs (gates E, and the tunnel half of G) are
   unverified. No claim about usable internet sharing is made from a successful build.
