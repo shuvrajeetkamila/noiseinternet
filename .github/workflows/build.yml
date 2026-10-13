@@ -68,8 +68,8 @@ jobs:
           log-level: verbose
       - name: Accept licenses and install the exact NDK / cmake / platform the module asks for
         run: |
-          yes "$ANDROID_SDK_ROOT/licenses/59cf7a7871bc91f7e6b177f0827b1c1857d991c2" > /dev/null || true
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true   # must be `yes |`, not `yes x > /dev/null`:
+                                                                  # the latter never exits and hangs the job
           sdkmanager --install \
             "platforms;${{ env.ANDROID_PLATFORM }}" \
             "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
