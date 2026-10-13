@@ -62,46 +62,49 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: ''
-          log-level: verbose
-      - name: Accept licenses and install the exact NDK / cmake / platform the module asks for
-        run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true   # must be `yes |`, not `yes x > /dev/null`:
-                                                                  # the latter never exits and hangs the job
-          sdkmanager --install \
-            "platforms;${{ env.ANDROID_PLATFORM }}" \
-            "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
-            "ndk;${{ env.ANDROID_NDK }}" \
-            "cmake;3.22.1" | tail -3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
-      - name: Assemble the debug APK (local debug keystore, created by the Gradle plugin)
-        working-directory: android
+      # One step for the whole native+Kotlin build, with the transcript kept in a file: the annotator
+      # step below can then publish the first errors as check annotations. That is not decoration -
+      # this project is developed from a sandbox that can read the Actions API but cannot follow the
+      # redirect to the log host, so without annotations a CI failure is literally unreadable here.
+      - name: Install SDK packages and assemble the debug APK
         run: |
           set +e
-          gradle :app:assembleDebug --no-daemon --stacktrace --warning-mode=all 2>&1 | tee /tmp/gradle.log
-          rc=${PIPESTATUS[0]}
-          if [ $rc -ne 0 ]; then
-            # Publish the first errors as check annotations. This repo gets developed from a sandbox
-            # that can read the Actions API but not the log-hosting redirect, so an unreadable failure
-            # would be an unfixable one.
-            grep -E "(^e: |error:|FAILURE:|FAILED)" /tmp/gradle.log | head -10 | \
-              while IFS= read -r line; do echo "::error::gradle: $line"; done
-            exit $rc
-          fi
-      - name: What is actually inside the APK (a real check that the native library was built)
-        run: |
+          {
+            echo "::group::sdkmanager"
+            yes | sdkmanager --licenses >/dev/null 2>&1
+            sdkmanager --install \
+              "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" \
+              "ndk;${ANDROID_NDK}" "cmake;3.22.1"
+            echo "sdkmanager rc=$?"
+            echo "::endgroup::"
+            echo "::group::gradle"
+            (cd android && gradle :app:assembleDebug --no-daemon --stacktrace --warning-mode=all)
+            echo "gradle rc=$?"
+            exit 0
+          } 2>&1 | tee android.log
+          grep -q "gradle rc=0" android.log || exit 1
           apk=$(find android -name '*-debug*.apk' | head -1)
-          test -n "$apk" || { echo "NO APK PRODUCED"; exit 1; }
-          echo "apk: $apk ($(stat -c %s "$apk") bytes)"
-          unzip -l "$apk" | sed -n '1,40p'
-          unzip -l "$apk" | grep -E 'lib/arm64-v8a/libnoiseinternet_jni.so|lib/x86_64/libnoiseinternet_jni.so' \
-            || { echo "APK has no native core - that is a build failure, not a success"; exit 1; }
+          test -n "$apk" || { echo "gradle said OK but no APK exists"; exit 1; }
           cp "$apk" noiseinternet-debug.apk
+          echo "apk: noiseinternet-debug.apk ($(stat -c %s noiseinternet-debug.apk) bytes)"
+          unzip -l noiseinternet-debug.apk | sed -n '1,30p'
+          unzip -l noiseinternet-debug.apk | grep -qE 'lib/(arm64-v8a|x86_64)/libnoiseinternet_jni.so' \
+            || { echo "APK contains no native core - that is a build failure, not a success"; exit 1; }
+        env:
+          ANDROID_PLATFORM: ${{ env.ANDROID_PLATFORM }}
+          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+          ANDROID_NDK: ${{ env.ANDROID_NDK }}
+      - name: Publish the first errors as annotations
+        if: failure()
+        run: |
+          [ -f android.log ] || { echo "::error::no android.log - the job died before the build step"; exit 0; }
+          grep -nE "(error:|^e: |FAILURE:|What went wrong|CMake Error|Could not|not found|undefined reference|FAILED)" android.log \
+            | head -12 | while IFS= read -r line; do echo "::error::${line:0:240}"; done
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: android-debug-apk
           path: noiseinternet-debug.apk
@@ -112,24 +115,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure (MSVC, x64)
-        run: cmake -S windows -B build-windows
-      - name: Build Release
-        run: |
-          cmake --build build-windows --config Release -j 2 -- /v:minimal 2>&1 | Tee-Object -FilePath build.log
-          if ($LASTEXITCODE -ne 0) {
-            Select-String -Path build.log -Pattern 'error [A-Z]+[0-9]+|LNK[0-9]{4}|CMake Error' |
-              Select-Object -First 10 | ForEach-Object { Write-Host "::error::msvc: $($_.Line)" }
-            exit 1
-          }
-      - name: Locate NoiseInternet.exe
+      - name: Configure and build with MSVC
         shell: pwsh
         run: |
+          cmake -S windows -B build-windows *> cfg.log
+          if ($LASTEXITCODE -ne 0) { Get-Content cfg.log; exit 2 }
+          cmake --build build-windows --config Release -j 2 -- /v:minimal *> build.log
+          if ($LASTEXITCODE -ne 0) { Get-Content build.log; exit 3 }
           $exe = Get-ChildItem -Path build-windows -Recurse -Filter NoiseInternet.exe | Select-Object -First 1
-          if (-not $exe) { Write-Error "NO EXE PRODUCED"; exit 1 }
+          if (-not $exe) { Write-Host "configure+build succeeded but no NoiseInternet.exe exists"; exit 4 }
           Write-Host "exe: $($exe.FullName) ($($exe.Length) bytes)"
           Copy-Item $exe.FullName NoiseInternet.exe
+      - name: Publish the first errors as annotations
+        if: failure()
+        shell: pwsh
+        run: |
+          foreach ($f in @('cfg.log','build.log')) {
+            if (Test-Path $f) {
+              Select-String -Path $f -Pattern 'error|CMake Error|FATAL|unresolved' |
+                Select-Object -First 10 | ForEach-Object { Write-Host "::error::$f : $($_.Line)" }
+            }
+          }
+          if (-not (Test-Path 'cfg.log')) { Write-Host "::error::no build logs - the job died before the build step" }
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: windows-noiseinternet-exe
           path: NoiseInternet.exe
