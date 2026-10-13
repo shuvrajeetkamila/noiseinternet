@@ -182,7 +182,9 @@ jobs:
                 # instead of a summary line, so a red test on one platform is diagnosable from here.
                 $ctx = Select-String -Path $f -Pattern '\*\*\*Failed' -Context 0,32 |
                   ForEach-Object { $_.Line; $_.Context.PostContext }
-                $b += "`n--- ctest failures ---`n" + (($ctx | Select-Object -First 60) -join "`n")
+                if ($ctx) {
+                  $b += "`n--- ctest failures ---`n" + (($ctx | Select-Object -First 60) -join "`n")
+                }
               }
             }
           }

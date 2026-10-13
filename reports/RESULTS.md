@@ -187,6 +187,7 @@ here as well: a green suite did not find them, and neither did a single end-to-e
     Evidence, both runs on this machine with `-fsanitize=address -g -O1`:
     before, `heap-use-after-free ... READ of size 1 ... SUMMARY: AddressSanitizer: heap-use-after-free
     common.cpp:137 in ni::ni_rd16`; after, `52 checks, 0 failures` and no ASan report.
+    Confirmed from the other side on the next CI run: `100% tests passed out of 8` on MSVC.
     The consequence for the product is bigger than for the test: out-of-order arrival is the normal case
     on a half-duplex acoustic link with retransmits, and every message that took that path was reading
     freed memory. Re-measured after the fix (medians of 3 trials, `--max-ms 900000`, rows `fix25-*` in
@@ -521,7 +522,8 @@ first honest statement about them is the compiler's, not mine. From the green ru
   success and this job refuses to call that a pass.
 * `cmake` + MSVC 19.51 (`/W3`, WASAPI backend on): **succeeded** for `ni_core`, `NoiseInternet.exe`
   (320 512 B, `PE32+ executable (console) x86-64, for MS Windows, 6 sections`), the `ni` CLI and all
-  eight test executables; `ctest` on that platform reports 7/8 (defect 24).
+  eight test executables; `ctest` on that platform reports 8/8 - and the only reason it ever reported
+  7/8 is defect 25: the Windows compiler was right and the code was wrong on every platform.
 * Getting there took four real compile-fix rounds (31 compiler errors total: M_PI, strtok_r,
   fork/exec, PROPVARIANT, IAudioClient::GetPeriodicity, the Initialize session-GUID misuse,
   SPEAKER_* masks, private `Impl`, JNI namespace qualification, five Kotlin API/typing errors,

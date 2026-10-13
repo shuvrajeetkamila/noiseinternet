@@ -28,9 +28,12 @@ description of intentions.
   §4.6). A 4 MB APK is not evidence about acoustic performance.
 * The proxy and VPN-tunnel legs are unverified: `ni demo` does not pair (defect 21) and the Android
   tunnel service has never been started on a device. Gate E stays FAIL.
-* On Windows the core compiles and **7 of 8 unit-test suites pass**; `t_arq` fails there while passing
-  on Linux (defect 24, open). That is published by the CI job itself rather than hidden, and it is why
-  this file says "a build" and not "a tested Windows port".
+* On Windows the core compiles and **8 of 8 unit-test suites pass**, the same as on Linux. The number is
+  recent history worth knowing: the first Windows runs were 7/8 with `t_arq` red, and that one suite was
+  reporting a real use-after-free in the ARQ out-of-order replay path that Linux's allocator masked
+  (defects 24-25 in `reports/RESULTS.md`). The run that published these files is the run that went green
+  after the fix - so the Windows artifact is "compiles, and the unit suites pass", which is still not
+  "tested on a sound card".
 * `lint`, `assembleRelease`, and any device install were never exercised on the Android side beyond
   `assembleDebug`.
 
