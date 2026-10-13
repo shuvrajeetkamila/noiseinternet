@@ -11,7 +11,9 @@ Both inputs are produced by the same runs quoted in reports/RESULTS.md:
 
 Every number here is a measurement written by the program under test in this workspace; nothing is
 synthesised, and empty/failed fields stay empty rather than being filled in. The `delivered` column
-of linksim.csv is 0 for every row in this file, and that is what was measured.
+of linksim.csv: rows whose `cfg` begins with `fix-` were taken after the burst-capacity fix (RESULTS.md
+defect 18) and include hash-verified multi-kB transfers; the older rows, every one of them `delivered 0`,
+are kept because they are the record of what the broken code did.
 """
 
 import json

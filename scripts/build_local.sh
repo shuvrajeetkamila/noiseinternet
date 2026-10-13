@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # build_local.sh — configure + build the shared core, the `ni` CLI and the test suite with the
 # host compiler. This is the fastest loop for development and the build that produced the
-# evidence in docs/RESULTS.md on Linux/gcc. For Windows cross-builds use
-# scripts/build_windows_zig.sh; for Android use android/build_apk.sh.
+# evidence in docs/RESULTS.md on Linux/gcc. Windows is built natively with MSVC (see
+# windows/BUILD.md) and Android with android/build_apk.sh; both also run in CI
+# (.github/workflows/build.yml), which is where the published APK and EXE come from.
 #
 #   scripts/build_local.sh [build-dir] [--debug] [--tests-off] [--clean]
 set -euo pipefail
