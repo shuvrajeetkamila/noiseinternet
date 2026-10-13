@@ -31,6 +31,10 @@ class WasapiEngine {
   WasapiEngine(const WasapiEngine&) = delete;
   WasapiEngine& operator=(const WasapiEngine&) = delete;
 
+  // Public because the translation unit that implements the engine opens each side through
+  // `WasapiEngine::Impl::Side&`; keeping it private made that a compile error (found by MSVC).
+  struct Impl;
+
   // COM apartment bookkeeping. Call thread_init() on every thread that touches an open engine
   // (the opening thread, the render pump, the capture pump) and thread_shutdown() on the way out.
   static int thread_init();
@@ -61,7 +65,6 @@ class WasapiEngine {
   std::string describe() const;
 
  private:
-  struct Impl;
   Impl* p_ = nullptr;
   double fs_ = 0.0;
   int render_ch_ = 0, capture_ch_ = 0, render_buf_ = 0, capture_buf_ = 0;

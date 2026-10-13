@@ -9,7 +9,8 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <propsys.h>   // PROPVAR / PropVariantClear (MSVC does not pull this in via the others)
+#include <propsys.h>   // PropVariantClear
+#include <mmreg.h>     // SPEAKER_* channel-mask constants
 
 #include <new>
 #include <string>
@@ -64,8 +65,8 @@ bool looks_like_loopback(const std::string& name) {
 std::string friendly_name(IMMDevice* dev) {
   IPropertyStore* ps = nullptr;
   if (FAILED(dev->OpenPropertyStore(STGM_READ, &ps)) || !ps) return std::string();
-  PROPVAR pv;
-  PropVariantInit(&pv);
+  PROPVARIANT pv;   // PROPVAR is a C++-only RAII helper in propidl.h; the plain variant is what
+                    // PropVariantInit/Clear take, and it needs no extra header on the SDK we target.
   std::string out;
   if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal)
     out = utf8(pv.pwszVal);
@@ -107,10 +108,13 @@ int enumerate_role(IMMDeviceEnumerator* en, EDataFlow flow, std::vector<AudioDev
         d.nominal_rate = (double)wf->nSamplesPerSec;
         d.channels = wf->nChannels > 0 ? (int)wf->nChannels : 1;
         d.bits = wf->wBitsPerSample ? (int)wf->wBitsPerSample : 32;
-        UINT per = 0, buf = 0;
+        UINT buf = 0;
+        REFERENCE_TIME hpn = 0, hsn = 0;
         if (SUCCEEDED(ac->GetBufferSize(&buf))) d.min_frames = (int)buf;
-        if (SUCCEEDED(ac->GetPeriodicity(&per))) {
-          // periodicity is in 100 ns units; convert to frames so the pump can size a period
+        // IAudioClient has no GetPeriodicity(); that is IAudioClient2. The device period pair is
+        // what the shared-mode engine actually runs on, and it is already in 100 ns units.
+        if (SUCCEEDED(ac->GetDevicePeriod(&hpn, &hsn))) {
+          REFERENCE_TIME per = flow == eRender ? hpn : hsn;
           double frames = (per / 10000000.0) * d.nominal_rate;
           if (frames > 1.0 && d.min_frames == 0) d.min_frames = (int)frames;
         }
@@ -228,11 +232,13 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
   f.Format.nAvgBytesPerSec = f.Format.nSamplesPerSec * f.Format.nBlockAlign;
   f.Format.cbSize = 22;
   f.Samples.wValidBitsPerSample = 32;
-  f.dwChannelMask = f.Format.nChannels == 1 ? SPEAKER_MONO : SPEAKER_STEREO;
+  f.dwChannelMask = f.Format.nChannels == 1 ? SPEAKER_FRONT_CENTER
+                                            : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
   f.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
   WAVEFORMATEX* closest = nullptr;
-  hr = s.ac->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, is_float ? (WAVEFORMATEX*)&f : (WAVEFORMATEX*)&f,
-                              &closest);
+  (void)is_float;  // the float mix format is what shared mode gives you; if the endpoint disagrees it
+                   // answers S_FALSE/unsupported and `closest` tells us what it wants (handled below).
+  hr = s.ac->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, (WAVEFORMATEX*)&f, &closest);
   if (hr == AUDCLNT_E_UNSUPPORTED_FORMAT || (FAILED(hr) && hr != S_FALSE)) {
     DWORD got = closest ? closest->nSamplesPerSec : mix->nSamplesPerSec;
     char buf[160];
@@ -250,9 +256,10 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
   if (closest) CoTaskMemFree(closest);
   CoTaskMemFree(mix);
 
-  UINT buf_frames = 0, per = 0;
+  UINT buf_frames = 0;
+  REFERENCE_TIME hpn = 0, hsn = 0;
   s.ac->GetBufferSize(&buf_frames);
-  s.ac->GetPeriodicity(&per);
+  s.ac->GetDevicePeriod(&hpn, &hsn);
   if (buf_frames < 8) buf_frames = 480;
   s.buf = (int)buf_frames;
   s.ch = (int)f.Format.nChannels;
@@ -261,8 +268,14 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
 
   s.ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
   UINT32 init_flags = flow == eCapture ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK : 0;
-  hr = s.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, init_flags, buf_frames, 0, (WAVEFORMATEX*)&s.fmt,
-                        flow == eCapture ? s.ev : nullptr);
+  // Initialize's 4th/5th duration arguments are 100 ns periods, not frame counts, and its last
+  // argument is an audio-session GUID - the capture event belongs in SetEventHandle (below), not
+  // here. Passing frames/handles was a wrong-unit bug that MSVC's prototype caught for the handle.
+  REFERENCE_TIME rate = (REFERENCE_TIME)f.Format.nSamplesPerSec;
+  REFERENCE_TIME hns_buf = rate ? (REFERENCE_TIME)(10000000.0LL * buf_frames / rate) : 300000;
+  REFERENCE_TIME hns_per = flow == eCapture ? hsn : hpn;
+  hr = s.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, init_flags, hns_buf, hns_per,
+                        (WAVEFORMATEX*)&s.fmt, nullptr);
   if (FAILED(hr)) {
     char buf[128];
     _snprintf(buf, sizeof(buf), "IAudioClient::Initialize failed (0x%08lx)", (unsigned long)hr);

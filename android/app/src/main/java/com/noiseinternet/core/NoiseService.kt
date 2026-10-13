@@ -296,12 +296,12 @@ class NoiseService : VpnService(), AudioEngine.Sink {
                 .addRoute("0.0.0.0", 0)
                 .setBlocking(true)
             // Our own traffic must stay outside the tunnel, or the fetch that feeds it is captured by
-            // it and the link eats its own tail. allowApplication takes an ApplicationInfo, not a
-            // package name, and enumerating installed apps can be refused on API 30+ without
-            // QUERY_ALL_PACKAGES - so try the broad form and fall back to the minimum.
+            // it and the link eats its own tail. The method is addAllowedApplication(ApplicationInfo)
+            // - not allowApplication(String), which is what this file claimed until the compiler
+            // said otherwise - and it throws NameNotFoundException if the package is unknown.
             try {
                 val mine = packageManager.getApplicationInfo(packageName, 0)
-                b = b.allowApplication(mine)
+                b = b.addAllowedApplication(mine)
             } catch (e: Exception) {
                 tunnelNote = "own app not excluded from tunnel (${e.javaClass.simpleName}): " +
                     "the link may loop its own traffic"
@@ -312,7 +312,10 @@ class NoiseService : VpnService(), AudioEngine.Sink {
                 return false
             }
             tun = p
-            protect(p.fileDescriptor)
+            // protect() takes the raw descriptor int; passing the FileDescriptor object is a type
+            // error the Kotlin compiler catches, and it would have been a "why is my own traffic
+            // looping back into the tunnel" mystery at runtime.
+            protect(p.fd)
             tunIn = FileInputStream(p.fileDescriptor)
             tunOut = FileOutputStream(p.fileDescriptor)
             tunnelUp = true
