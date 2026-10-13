@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Noise Internet - Android manifest.
+
+  Every permission here has a reason in the code, and nothing is requested that the app does not use:
+  RECORD_AUDIO (capture), MODIFY_AUDIO_SETTINGS (route + preferred devices), INTERNET (the giver's
+  fetches), FOREGROUND_SERVICE + FOREGROUND_SERVICE_MICROPHONE (the link must survive the screen being
+  off, and on API 34 a service that holds the microphone needs the microphone type explicitly),
+  WAKE_LOCK (the pump threads). No storage permission: reports are shown on screen, not written to
+  shared storage, so a test log cannot leak into other apps.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.noiseinternet.app">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.audio.output"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@android:drawable/stat_notify_sync"
+        android:label="Noise Internet"
+        android:usesCleartextTraffic="true"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light">
+
+        <activity
+            android:name="com.noiseinternet.app.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The link owner. It extends VpnService, which is enough to call establish() for our own
+             tunnel: the BIND_VPN_SERVICE permission and the VpnService intent-filter are only needed
+             to let the *system* start it as an always-on VPN, and declaring them here would stop our own
+             app from starting the service at all (a signature permission we do not hold). Consequence,
+             stated plainly: no "always-on" or "system VPN" integration - the tunnel lives and dies with
+             the link session, which is the lifecycle we want anyway.
+
+             foregroundServiceType=microphone is what API 34 requires for a service holding AudioRecord. -->
+        <service
+            android:name="com.noiseinternet.core.NoiseService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+    </application>
+</manifest>

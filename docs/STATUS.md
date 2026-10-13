@@ -104,29 +104,31 @@ attempted here.
 *Not proved:* that a real calibration on a real phone+PC pair picks a usable profile, and that the
 adaptation loop tracks a changing room.
 
-### 10. Android and Windows apps, artifacts — **not delivered**
-As of this commit the tree contains **no `android/` directory, no `windows/` directory, no `tests/`
-directory and no `artifacts/` directory**. Only the portable C++ core, its unit tests, the protocol
-spec files, the Python vector generator, `scripts/` and `reports/` exist. So the platform shells are not
-"unverified source" — for this checkout they are *absent*, and the honest statement is that milestone 10
-was not delivered here.
+### 10. Android and Windows apps, artifacts — **source present, never compiled; no artifacts**
+`android/` (Gradle project, Kotlin `NoiseCore`/`PhyTools` bindings, `AudioEngine`, a foreground
+`NoiseService` that also owns a UDP/DNS `VpnService` tunnel, the operator UI) and `windows/` (CMake
+project, WASAPI device enumeration + shared-mode render/capture, a console front end with the same field
+list) now exist as written code. `tests/physical/` holds the over-the-air protocol and a runner that
+refuses to emit a CSV row when no recorder exists; `artifacts/` is empty by design and says why.
 
-Two independent reasons, both true, and neither one is a tooling excuse that hides a missing file:
+Proved, in a narrow but real sense: the **interface** both shells sit on works. `t_abi` (33 assertions, in
+`ctest`) drives the flat C ABI the way a shell does - create from JSON, refuse a config that is not an
+object, `start`/`step`/`stop`, status and report documents, the refusal code for application data on an
+unpaired node, FFI input validation, the 16-entry profile table the spinners render, and a stateless
+`ni_abi_render` -> `ni_abi_decode` round trip of a 40-byte payload. That is the layer the JNI bridge and
+the Win32 front end call, and it is green.
 
-1. Nothing in this sandbox can build them: no JDK/Android SDK/NDK (so no APK, and nothing is
-   "debug-signed" either — signing needs the tools), no MSVC or `zig` (so no EXE), and `cmake` only via
-   the wheel in `/home/user/env`.
-2. Even with a toolchain, the audio backends (`NI_WITH_WASAPI`, `NI_WITH_AAUDIO`) were never compiled
-   here because the core is built with no audio backend at all - `ni audit` prints
-   `audio backend: not compiled in` and 0 devices. The shared core's transport and PHY are exercised
-   only through files and the simulator.
+Not proved: that any of it compiles, installs, records, plays, opens a tunnel or moves a byte. Two
+independent blockers, each written into the platform's `BUILD.md`: no JDK / Android SDK / NDK, so no APK
+and no signature of any kind (not "debug-signed" - nothing was signed); and no MSVC / MinGW / `zig`, so no
+EXE. Concretely, the platform code has never been near a compiler: while writing the WASAPI backend it
+turned out that the core's `#if defined(NI_WITH_WASAPI)` branch in `wav.cpp` called
+`ni_wasapi_enumerate(out, ...)` with `out` as an **unnamed parameter**, so the Windows build could not have
+compiled at all. Fixed here, but it is the measure of how thin the coverage of these directories is -
+`ni audit` reports `audio backend: not compiled in`, and no `AudioRecord` path has ever run either.
 
-The interface the shells would sit on does exist and is tested: the flat C ABI in
-`shared/acoustic_core/include/ni/abi.h` (`ni_abi_create/destroy/start/step/feed_pcm/pull_pcm/
-send_bytes/render/decode/calibrate/test_link/version/profiles_json/audio_enumerate` + `ni_abi_free`),
-which the Linux CLI uses itself, so a Kotlin or Win32 shell is a thin binding rather than a second
-implementation. `docs/BUILD_ANDROID.md` / `docs/BUILD_WINDOWS.md` (if present) or `docs/ADR-001`
-record what would have to be compiled in what order.
+How to build each one, and what to expect on the first attempt:
+[`../android/BUILD.md`](../android/BUILD.md), [`../windows/BUILD.md`](../windows/BUILD.md).
 
 ## Gates
 
@@ -138,12 +140,12 @@ question, this table is authoritative.
 |---|---|---|---|
 | A | Code builds; frame format, CRCs, vectors agree with an independent implementation | **PASS** | `build_local.sh` green; `ctest` 7/7; vectors from `python/gen_vectors.py` against Python `cryptography` + RFCs |
 | B | PHY transmits arbitrary data over the modelled device chain and it decodes | **PARTIAL** | WAV round-trip sha256-equal; per-profile 7/8 … 0/8; FSK and QAM16/64 fail; no over-the-air data (no hardware) |
-| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **FAIL** | pairing completes, acks/RTT/retransmits live, but `delivered 0` in 16/16 trials; `reports/linksim.csv` |
+| C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **FAIL** | pairing completes, acks/RTT/retransmits live, but `delivered 0` in 17/17 trials; `reports/linksim.csv`. New lead: the same profile decodes 100 % of single bursts in `ni bench` while a two-node session delivers nothing, and `Node::pull_playback` applies the channel model to whole accumulated transmit blocks - `RESULTS.md` section 4.6 |
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
 | E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | never attempted end-to-end; blocked by gate C. No external host was contacted from this sandbox |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
-| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **FAIL** | no `android/` or `windows/` source in this tree, and no JDK/SDK/NDK/MSVC/zig to build one even if it existed |
-| H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | this file, `RESULTS.md`, `raw/` logs, `reports/*.csv`, `scripts/raw_to_csv.py`, 7 ctest targets; **`ctest` registration of the physical-test harness and a benchmark-runner script are missing** |
+| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **FAIL** | the sources exist (`android/`, `windows/`) and the ABI they call is unit-tested, but nothing has been compiled or signed: no JDK/SDK/NDK/MSVC/zig here, so there is no artifact and no tunnel result |
+| H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
 
 ## What is explicitly *not* claimed
 
@@ -167,6 +169,8 @@ cd build-linux && ctest --output-on-failure                        # expect: 100
 
 # physical-layer evidence (each takes tens of seconds)
 ./build-linux/ni selftest --profile all --trials 8 --snr 25 | tee reports/raw/selftest_snr25_dfree10.txt
+./build-linux/ni bench --profile 2,3,5,10,11 --trials 3 \
+    --csv reports/bench_sweep.csv --json reports/bench_sweep.json   # the CSV + JSON benchmark
 ./build-linux/ni calibrate --trials 3 --snr 25          | tee reports/raw/calibrate.txt
 ./build-linux/ni linksim --bytes 228 --trials 2 --max-ms 3000 --profile 3 --snr 35 \
     --no-multipath --json >> reports/raw/linksim.jsonl            # expect ok:false until gate C passes
@@ -180,9 +184,12 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    turnaround/listen window, and `modem.cpp:426` ignoring the descriptor's modulation id.
 2. Register the tests with the physical-test harness and add a benchmark runner
    (`scripts/run_benchmarks.sh`) so `RESULTS.md` can be regenerated in one command.
-3. `protocol/modulation_profiles.json` has drifted from the C++ table: it is missing the `cp` field and
+3. **Fix the simulator's channel application before anything else on gate C**: apply the model per burst
+   with a guard interval instead of to whole accumulated transmit blocks (`Node::pull_playback`), because
+   `ni bench` proves the same profile is error-free burst-by-burst at the SNR linksim reports.
+4. `protocol/modulation_profiles.json` has drifted from the C++ table: it is missing the `cp` field and
    ids 14/15, so the spec file and the firmware disagree. Generate it from the code or add a test that
    diffs them.
-4. Only profiles 2/3/5/10/11 have been round-tripped through the full link; 11 of 16 have not.
-5. No Windows/Android compile was attempted with a real toolchain; expect the platform files to need
+5. Only profiles 2/3/5/10/11 have been round-tripped through the full link; 11 of 16 have not.
+6. No Windows/Android compile was attempted with a real toolchain; expect the platform files to need
    fixes before they build.

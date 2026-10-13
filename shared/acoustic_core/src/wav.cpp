@@ -2,6 +2,9 @@
 // Used for: offline rendering for real-hardware tests, the file-backed loopback tests, and
 // saving recordings produced on device for later analysis.
 #include "ni/audio_io.h"
+#if defined(NI_WITH_WASAPI)
+#include "ni/audio_wasapi.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -191,8 +194,11 @@ int ni_wav_read_f32(const std::string& path, std::vector<float>* out, double* fs
 
 std::string ni_wav_path_of(const std::string& p) { return p; }
 
-int ni_audio_enumerate(std::vector<AudioDeviceInfo>*, std::string* why) {
+int ni_audio_enumerate(std::vector<AudioDeviceInfo>* out, std::string* why) {
 #if defined(NI_WITH_WASAPI)
+  // This branch has never been compiled: `out` used to be an unnamed parameter, so the WASAPI
+  // build failed here with "undeclared identifier". Kept in-tree so the Windows port is a real
+  // diff and not a surprise; see docs/STATUS.md gate G.
   return ni_wasapi_enumerate(out, why);
 #else
   if (why)

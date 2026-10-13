@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The operator panel. One control per thing the engine can actually configure or report, in the order
+  you would use them: pick a role, pick the devices, pick the modulation, join, then measure.
+  There is no "speed" gauge here: throughput appears only inside the measured block below, and it is
+  printed as "-" until the engine has a real number for it.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <TextView
+            android:id="@+id/banner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="NOT TESTED: nothing has been measured by this app"
+            android:textStyle="bold"
+            android:paddingBottom="8dp" />
+
+        <TextView
+            android:id="@+id/state_line"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textSize="12sp"
+            android:text="no node yet - press Start"
+            android:paddingBottom="12dp" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Role" android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/role"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/role_receiver"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="Receiver (uses the link)" />
+
+            <RadioButton
+                android:id="@+id/role_giver"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Giver (shares its connection)" />
+        </RadioGroup>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Microphone" android:paddingTop="8dp" />
+
+        <Spinner android:id="@+id/input_device"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Speaker" />
+
+        <Spinner android:id="@+id/output_device"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Modulation profile (from the core's own table)" />
+
+        <Spinner android:id="@+id/profile"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Session id (both ends must match)" />
+
+        <EditText android:id="@+id/session_id"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="number" android:text="0" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Pairing passphrase (short ones are weak: the core prints the entropy)" />
+
+        <EditText android:id="@+id/secret"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="textPassword" />
+
+        <CheckBox android:id="@+id/duplex"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Full duplex (FDD + echo cancellation - experimental, never tested on hardware)" />
+
+        <CheckBox android:id="@+id/tunnel"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Route UDP/DNS through a VPN tunnel (TCP is not supported - see BUILD.md)" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="8dp">
+
+            <Button android:id="@+id/start" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Start" />
+
+            <Button android:id="@+id/stop" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Stop" />
+
+            <Button android:id="@+id/refresh" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Refresh" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button android:id="@+id/calibrate" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Calibrate" />
+
+            <Button android:id="@+id/link_test" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Link test" />
+
+            <Button android:id="@+id/net_test" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Internet test" />
+        </LinearLayout>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Measured reports" android:textStyle="bold" android:paddingTop="12dp" />
+
+        <TextView
+            android:id="@+id/results"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textIsSelectable="true"
+            android:textSize="11sp"
+            android:text="(nothing run yet)" />
+    </LinearLayout>
+</ScrollView>
