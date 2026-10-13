@@ -32,6 +32,13 @@ target_include_directories(ni_core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 # NI_WITH_WASAPI is what makes ni_audio_enumerate() and the pump in audio_wasapi.cpp real; without it
 # the core reports "no audio backend" and the app refuses to claim anything.
 target_compile_definitions(ni_core PUBLIC NI_WITH_WASAPI=1)
+# proxy.cpp uses Winsock, and it is part of the shared core, so the socket library belongs here rather
+# than in the app target. Without it the link fails on unresolved WSA*/getaddrinfo symbols. (Found by
+# CI: this file had never been configured before the build-artifacts workflow ran.)
+if(MSVC)
+  target_compile_definitions(ni_core PUBLIC _WINSOCK_DEPRECATED_NO_WARNINGS)
+endif()
+target_link_libraries(ni_core PUBLIC ws2_32)
 
 add_executable(NoiseInternet
   ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/main.cpp

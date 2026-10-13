@@ -34,7 +34,7 @@ Constellation make_constellation(int mod) {
       c.pts.resize(4);
       for (int v = 0; v < 4; v++) {
         uint32_t g = ni_gray_enc((uint32_t)v);
-        double a = 0.5 * M_PI * (double)g;
+        double a = 0.5 * NI_PI * (double)g;
         c.pts[v] = {(float)cos(a), (float)sin(a)};
       }
       break;
@@ -695,7 +695,7 @@ double ni_cfo_estimate(const Fft& f, const float* x, size_t n, size_t pos, int k
     si += (double)i1[i] * r0[i] - (double)r1[i] * i0[i];
   }
   double T = (double)L / fs;
-  return atan2(si, sr) / (2.0 * M_PI * T);
+  return atan2(si, sr) / (2.0 * NI_PI * T);
 }
 
 int Modem::rx_capture(const float* x, size_t n, RxResult* out) const {

@@ -20,7 +20,7 @@ bool ni_fft_init(Fft* f, int n) {
     return false;
   }
   for (int k = 0; k < n / 2; k++) {
-    double a = -2.0 * M_PI * (double)k / (double)n;
+    double a = -2.0 * NI_PI * (double)k / (double)n;
     f->tw_re[k] = (float)cos(a);
     f->tw_im[k] = (float)sin(a);
   }
@@ -141,7 +141,7 @@ void ni_add_cp_tapered(const float* sym, int cp, float* out, float taper_gain) {
   // the body (the "smoothed OFDM" variant) would need a matched window at the receiver and
   // silently destroys the differential decisions on the first bins.
   for (int i = 0; i < w; i++) {
-    double a = 0.5 * (1.0 - cos(M_PI * (double)(i + 1) / (double)(w + 1)));
+    double a = 0.5 * (1.0 - cos(NI_PI * (double)(i + 1) / (double)(w + 1)));
     float g = (float)(taper_gain + (1.0 - taper_gain) * a);
     out[i] *= g;             // fade in from the previous symbol's tail
     out[cp - 1 - i] *= g;    // fade up into the body

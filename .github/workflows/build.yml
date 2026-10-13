@@ -81,8 +81,17 @@ jobs:
       - name: Assemble the debug APK (local debug keystore, created by the Gradle plugin)
         working-directory: android
         run: |
-          gradle :app:assembleDebug --no-daemon --stacktrace --warning-mode=all \
-            -Pandroid.sdk.channel=3 -Dorg.gradle.daemon=false
+          set +e
+          gradle :app:assembleDebug --no-daemon --stacktrace --warning-mode=all 2>&1 | tee /tmp/gradle.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            # Publish the first errors as check annotations. This repo gets developed from a sandbox
+            # that can read the Actions API but not the log-hosting redirect, so an unreadable failure
+            # would be an unfixable one.
+            grep -E "(^e: |error:|FAILURE:|FAILED)" /tmp/gradle.log | head -10 | \
+              while IFS= read -r line; do echo "::error::gradle: $line"; done
+            exit $rc
+          fi
       - name: What is actually inside the APK (a real check that the native library was built)
         run: |
           apk=$(find android -name '*-debug*.apk' | head -1)
@@ -106,7 +115,13 @@ jobs:
       - name: Configure (MSVC, x64)
         run: cmake -S windows -B build-windows
       - name: Build Release
-        run: cmake --build build-windows --config Release -j 2 -- /v:minimal
+        run: |
+          cmake --build build-windows --config Release -j 2 -- /v:minimal 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            Select-String -Path build.log -Pattern 'error [A-Z]+[0-9]+|LNK[0-9]{4}|CMake Error' |
+              Select-Object -First 10 | ForEach-Object { Write-Host "::error::msvc: $($_.Line)" }
+            exit 1
+          }
       - name: Locate NoiseInternet.exe
         shell: pwsh
         run: |

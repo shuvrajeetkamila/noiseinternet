@@ -53,8 +53,8 @@ void ni_device_defaults(int model, double* hp, double* res_hz, double* res_db, d
 
 Biquad ni_biquad_highpass(double f0, double fs) {
   Biquad b{};
-  double w0 = 2.0 * M_PI * f0 / fs;
-  if (w0 > M_PI - 1e-6) w0 = M_PI - 1e-6;
+  double w0 = 2.0 * NI_PI * f0 / fs;
+  if (w0 > NI_PI - 1e-6) w0 = NI_PI - 1e-6;
   double cw = cos(w0), sw = sin(w0), q = 0.7071068, al = sw / (2.0 * q);
   double a0 = 1.0 + al;
   b.b0 = ((1.0 + cw) * 0.5) / a0;
@@ -66,8 +66,8 @@ Biquad ni_biquad_highpass(double f0, double fs) {
 }
 Biquad ni_biquad_lowpass(double f0, double fs) {
   Biquad b{};
-  double w0 = 2.0 * M_PI * f0 / fs;
-  if (w0 > M_PI - 1e-6) w0 = M_PI - 1e-6;
+  double w0 = 2.0 * NI_PI * f0 / fs;
+  if (w0 > NI_PI - 1e-6) w0 = NI_PI - 1e-6;
   double cw = cos(w0), sw = sin(w0), q = 0.7071068, al = sw / (2.0 * q);
   double a0 = 1.0 + al;
   b.b0 = ((1.0 - cw) * 0.5) / a0;
@@ -84,8 +84,8 @@ Biquad ni_biquad_peaking(double f0, double fs, double gain_db, double q) {
   // and destroyed the burst.
   Biquad b{};
   double A = pow(10.0, gain_db / 40.0);
-  double w0 = 2.0 * M_PI * f0 / fs;
-  if (w0 > M_PI - 1e-6) w0 = M_PI - 1e-6;
+  double w0 = 2.0 * NI_PI * f0 / fs;
+  if (w0 > NI_PI - 1e-6) w0 = NI_PI - 1e-6;
   double cw = cos(w0), sw = sin(w0), al = sw / (2.0 * q);
   double a0 = 1.0 + al / A;
   b.b0 = (1.0 + al * A) / a0;
@@ -148,7 +148,7 @@ double AcousticChannel::pn_gauss() {
   pn_s_ ^= pn_s_ >> 12; pn_s_ ^= pn_s_ << 25; pn_s_ ^= pn_s_ >> 27;
   double u2 = ((double)(pn_s_ * 0x2545F4914F6CDD1Dull) + 1.0) / 1.8446744073709552e19;
   if (u1 < 1e-12) u1 = 1e-12;
-  return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * NI_PI * u2);
 }
 
 void AcousticChannel::noise_stream(size_t n, std::vector<float>* out) {
@@ -241,7 +241,7 @@ void AcousticChannel::process(const float* in, size_t n, std::vector<float>* out
     double fc = 16000.0 / (1.0 + 0.35 * (cfg_.distance_m - 0.5));
     if (fc < 2500) fc = 2500;
     if (fc > 0.45 * cfg_.fs) fc = 0.45 * cfg_.fs;
-    double k = exp(-2.0 * M_PI * fc / cfg_.fs);
+    double k = exp(-2.0 * NI_PI * fc / cfg_.fs);
     double acc = absorb_acc_;
     for (size_t i = 0; i < n; i++) {
       acc = k * acc + (1.0 - k) * a[i];

@@ -162,7 +162,7 @@ double Rng::normal() {
   double u1 = uniform();
   if (u1 < 1e-12) u1 = 1e-12;
   double u2 = uniform();
-  return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * NI_PI * u2);
 }
 void Rng::bytes(void* dst, size_t n) {
   uint8_t* p = (uint8_t*)dst;

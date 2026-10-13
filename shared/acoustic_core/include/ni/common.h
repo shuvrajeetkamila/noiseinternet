@@ -11,6 +11,11 @@
 #include <stdint.h>
 #include <string>
 
+// NI_PI is not standard C++: it is hidden behind _USE_MATH_DEFINES on MSVC and is absent in strict
+// mode. Every use in this tree goes through NI_PI so no source file has to care which compiler it is
+// fed, which is the whole point of a shared core.
+#define NI_PI 3.14159265358979323846
+
 #if defined(_WIN32)
 #define NI_STRCASECMP _stricmp
 #else
