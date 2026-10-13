@@ -1,0 +1,30 @@
+{
+ "_comment": "96-bit AEAD nonce = sid_be(4) || counter_be(8). The counter is the sequence number carried on the wire, and it is never rewound while a key is live.",
+ "cases": [
+  {
+   "counter": 0,
+   "nonce_hex": "00004e310000000000000000",
+   "sid_be_hex": "00004e31"
+  },
+  {
+   "counter": 1,
+   "nonce_hex": "00004e310000000000000001",
+   "sid_be_hex": "00004e31"
+  },
+  {
+   "counter": 4294967295,
+   "nonce_hex": "0000000100000000ffffffff",
+   "sid_be_hex": "00000001"
+  },
+  {
+   "counter": 18446744073709551615,
+   "nonce_hex": "00000000ffffffffffffffff",
+   "sid_be_hex": "00000000"
+  },
+  {
+   "counter": 72623859790382856,
+   "nonce_hex": "102030400102030405060708",
+   "sid_be_hex": "10203040"
+  }
+ ]
+}

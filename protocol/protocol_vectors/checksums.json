@@ -1,0 +1,20 @@
+{
+ "_comment": "CRC/FNV check values for the ASCII string 123456789 and for the empty string, computed by the bitwise definitions in python/gen_vectors.py",
+ "crc16_ccitt_false": {
+  "123456789": "0x29b1",
+  "empty": "0xffff"
+ },
+ "crc32_ieee": {
+  "123456789": "0xcbf43926",
+  "empty": "0x00000000"
+ },
+ "crc8_poly07_initff": {
+  "123456789": "0xfb",
+  "empty": "0xff"
+ },
+ "fnv1a32": {
+  "123456789": "0xbb86b11c",
+  "a": "0xe40c292c",
+  "empty": "0x811c9dc5"
+ }
+}

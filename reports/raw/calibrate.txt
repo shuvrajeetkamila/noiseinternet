@@ -1,0 +1,13 @@
+NOISE INTERNET calibration - 3 trials per profile at each of 18, 12 and 7 dB
+profile            snr_dB     ok%    rawBER    fecBER       bps  clip usable  note
+DBPSK-MID           17.34   66.7%  8.47e-02  2.39e-02      1219    no     no  6/9 frames ok over the simulated channel
+DBPSK-WIDE          12.38   55.6%  6.74e-02  7.59e-03      2400    no     no  5/9 frames ok over the simulated channel
+DQPSK-WIDE          10.41    0.0%  9.84e-02  1.38e-01      4267    no     no  0/9 frames ok over the simulated channel
+QAM16-WIDE          10.57    0.0%  3.17e-01  4.97e-01      6400    no     no  0/9 frames ok over the simulated channel
+RAW-DBPSK-MID       14.53    0.0%  1.07e-01  2.75e-01      2259    no     no  0/9 frames ok over the simulated channel
+FSK-MID             18.00    0.0%  1.22e-01  1.42e-01       614    no     no  0/9 frames ok over the simulated channel
+DBPSK-ULTRA         15.82    0.0%  2.38e-01  4.79e-01       937    no     no  0/9 frames ok over the simulated channel
+QAM16-ULTRA          2.92    0.0%  7.71e-02  1.16e-01       656    no     no  0/9 frames ok over the simulated channel
+recommended profile : DBPSK-MID
+suggested mtu       : 224
+8 band(s) probed, 0 usable; conservative choice DBPSK-MID; NOT TESTED on hardware: no audio device here; profile numbers come from the simulated acoustic channel

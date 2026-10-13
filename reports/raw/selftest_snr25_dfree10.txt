@@ -1,0 +1,18 @@
+profile         snr_dB       ok    rawBER    fecBER burst_ms     B/s   evec%
+FSK-VOICE          0.0   0/8     0.00e+00  0.00e+00      0.0       0    0.00  rx: synced but bit stream unusable
+FSK-MID            0.0   0/8     0.00e+00  0.00e+00      0.0       0    0.00  rx: synced but bit stream unusable
+DBPSK-MID         19.5   2/8     8.41e-02  1.60e-02    666.7     180   76.78  frame decode failed after PHY
+DBPSK-WIDE        21.7   4/8     4.89e-02  3.63e-03    320.0     375   70.21  frame decode failed after PHY
+DQPSK-WIDE        20.6   1/8     6.95e-02  3.30e-02    173.3     692   64.60  rx: declared length out of range
+QAM16-WIDE        14.4   0/8     3.74e-01  4.98e-01    113.3    1059   72.32  rx: declared length out of range
+QAM64-WIDE        15.7   0/8     3.39e-01  4.62e-01     93.3    1286   58.79  frame decode failed after PHY
+DBPSK-ULTRA       16.3   0/8     2.18e-01  3.98e-01    873.3     137   74.88  frame decode failed after PHY
+QAM16-ULTRA       14.6   0/8     4.34e-01  4.36e-01    233.3     514   49.75  rx: declared length out of range
+RAW-DBPSK-MID     20.0   0/8     9.17e-02  2.36e-01    346.7     346   77.38  rx: declared length out of range
+FD-LOW-DBPSK      25.5   7/8     2.87e-02  6.01e-04    860.0      95   74.45  frame decode failed after PHY
+FD-HIGH-DBPSK     23.6   5/8     4.40e-02  6.27e-03    566.7     212   71.62  frame decode failed after PHY
+FD-LOW-QAM16      22.6   0/8     3.39e-01  5.02e-01    306.7     316   67.04  rx: declared length out of range
+FD-HIGH-QAM16     22.4   0/8     3.25e-01  4.98e-01    186.7     643   63.47  rx: declared length out of range
+DBPSK-MID-ECHO    19.3   4/8     8.06e-02  1.21e-02    933.3     129   82.99  frame decode failed after PHY
+DQPSK-WIDE-ECHO   21.0   0/8     9.42e-02  5.79e-02    248.0     484   58.30  frame decode failed after PHY
+

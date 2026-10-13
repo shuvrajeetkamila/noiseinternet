@@ -1,0 +1,179 @@
+// node.h — the whole engine for one device: role, modem, link, proxy, calibration,
+// statistics, and the JSON the UIs render. This is the object the Android service, the
+// Windows app, the CLI and the simulator all drive, so behaviour cannot diverge.
+#ifndef NI_NODE_H
+#define NI_NODE_H
+#include <memory>
+#include <string>
+#include <vector>
+#include "ni/aec.h"
+#include "ni/channel_sim.h"
+#include "ni/proxy.h"
+#include "ni/session.h"
+
+namespace ni {
+
+struct NodeConfig {
+  Role role = NI_ROLE_GIVER;
+  bool is_master = true;       // link master (polls). Default: the giver.
+  int profile_id = 2;          // DBPSK-MID
+  double fs = 48000.0;
+  double tx_amplitude = 0.85;
+  uint16_t session_id = 0;
+  std::string pairing_secret;   // empty = unpaired (DATA refused unless allow_plaintext)
+  bool allow_plaintext_test = false;
+  int duplex = 0;               // 0 half, 1 FDD full-duplex experiment
+  int rx_profile_id = -1;       // duplex=1 only
+  int aec_taps = 1024;
+  int listen_ms = 900;
+  int turnaround_ms = 60;
+  int max_retransmit = 5;
+  // proxy
+  bool enable_receiver_proxy = false;
+  bool enable_giver_fetch = true;
+  int proxy_port = 8471;
+  std::string proxy_bind = "127.0.0.1";
+  std::string proxy_token;      // empty -> generated
+  // simulation channel (only used by the simulator / self-test)
+  bool sim_channel = false;
+  ChannelConfig ch;
+  std::string name = "node";
+  int calibrate_trials = 3;   // per band, per SNR point
+  int arq_wait_ms = 12000;    // how long test_link pumps before giving up
+};
+
+struct StatusSnapshot {
+  std::string name, role, state_name;
+  int state = NI_ST_IDLE;
+  bool running = false;
+  int profile_id = 0;
+  std::string profile_name, modulation;
+  double sample_rate = 0;
+  std::string input_device = "not selected", output_device = "not selected";
+  bool peer_online = false;
+  int64_t peer_seen_ms = 0;
+  int64_t session_ms = 0;
+  double snr_db = 0, rssi_dbfs = -120, noise_dbfs = -120, evec_pct = 0;
+  double link_bps = 0, useful_bps_up = 0, useful_bps_down = 0;
+  double loss_pct = 0, rtt_ms = 0, erle_db = 0;
+  uint64_t bytes_sent = 0, bytes_received = 0, frames_sent = 0, frames_received = 0;
+  uint64_t retries = 0, crc_fail = 0, malformed = 0;
+  bool tunnel_up = false, internet_ok = false;
+  std::string tunnel_detail, internet_detail;
+  int mtu = 0;
+  std::string audio_note;      // "NOT TESTED: no audio hardware in this environment" etc.
+  std::string to_json() const;
+};
+
+class Node {
+ public:
+  explicit Node(const NodeConfig& cfg);
+  ~Node();
+
+  int configure();     // builds modem/link; NI_ERR_PARAM on invalid input
+  int start();
+  void stop();
+  bool running() const { return running_; }
+
+  // PCM plumbing
+  int feed_capture(const float* x, size_t n);  // microphone samples in
+  int pull_playback(float* out, size_t cap);    // speaker samples out
+  bool playback_ready() const { return link_ ? link_->tx_ready() : false; }
+
+  // Advance all state machines. now_ms is this device's monotonic clock.
+  int step(int64_t now_ms);
+  // When a modelled channel sits between the two ends, the link can be told to wait for its own
+  // audio to be played before it starts the next burst (paced, like a real sound card) or to ignore
+  // that and let the simulation drain the queue as fast as the host can compute (unpaced). Paced is
+  // the honest model; unpaced runs 100x faster and was the default while the simulator was written,
+  // which is why LinkSimOptions::pace_tx exists - see reports/RESULTS.md on what changes between
+  // them. `Node::step` reports the backlog to the link only when pacing is on.
+  void set_pace_tx(bool on) { pace_tx_ = on; }
+
+  const NodeConfig& config() const { return cfg_; }
+  ArqEngine& arq() { return link_->arq(); }
+  AcousticLink* link() { return link_.get(); }
+  int state() const { return link_ ? link_->state() : NI_ST_IDLE; }
+  StatusSnapshot snapshot() const;
+
+  // ---- user actions (all measured, none of them a stub) ----
+  int calibrate(int64_t now_ms, Calibrator::Report* out);   // runs a full calibration exchange
+  int test_link(int64_t now_ms, int payload_bytes, std::string* report);  // hash-compared ping
+  int test_internet(int64_t now_ms, const std::string& url, InternetVerify* out);
+  // Loopback self-check usable with no peer: render -> channel model -> decode.
+  int selftest(int payload_bytes, uint64_t seed, PhyTestResult* out);
+  int start_calibration_probe(int profile_id, int frames, uint16_t* tag);
+
+  // ---- data plane for the UIs / tools ----
+  int send_bytes(uint16_t stream, MsgType t, const uint8_t* p, size_t n, uint16_t flags = 0);
+  void set_message_handler(std::function<void(const Delivered&)> h);
+  ReceiverGateway* receiver_proxy() { return rproxy_.get(); }
+  GiverGateway* giver() { return gproxy_.get(); }
+  std::string status_json() const { return snapshot().to_json(); }
+  std::string diagnostics_json() const { return link_ ? link_->diagnostics_json() : "{}"; }
+  std::string export_report_json(int64_t now_ms) const;
+  int64_t now_ms = 0;               // maintained by step() for the JSON exporters
+  // link test bookkeeping (used by test_link and the FILE handler)
+  struct LinkTest {
+    bool pending = false;
+    bool answered = false;
+    bool hash_ok = false;
+    int64_t t0 = 0, t1 = 0;
+    size_t bytes = 0;
+    std::string expect_sha, got_sha;
+  } lt_, lt_in_;
+  std::string test_report;
+
+  const std::string& proxy_token() const { return tok_; }
+  std::string last_error() const { return err_; }
+  // Role switch with safety checks (prompt 4: refuse incompatible role/simultaneous session)
+  int set_role(Role r);
+  int set_profile(int pid);
+  bool audio_hardware_present() const { return hw_present_; }
+  // Deliberate payload-leak self-check used by the tests (see ADR D8).
+  const std::vector<uint8_t>& debug_tx_bytes() const { return tx_dump_; }
+  void enable_tx_dump(bool on) { tx_dump_on_ = on; }
+
+ private:
+  int ensure_built();
+  NodeConfig cfg_;
+  bool built_ = false, running_ = false, hw_present_ = false;
+  std::string err_, tok_;
+  std::unique_ptr<AcousticLink> link_;
+  std::unique_ptr<ReceiverGateway> rproxy_;
+  std::unique_ptr<GiverGateway> gproxy_;
+  bool pace_tx_ = true;                     // see set_pace_tx
+  std::unique_ptr<AcousticChannel> chan_;   // sim channel applied to our own TX
+  std::unique_ptr<NlmsAec> aec_;
+  std::function<void(const Delivered&)> msg_;
+  void on_delivered(const Delivered& d);
+  std::vector<float> rx_hold_;
+  std::vector<float> raw_tx_, ready_tx_;
+  size_t ready_off_ = 0;
+  std::string audio_note_;
+  NetInfo peer_netinfo_{};
+  bool peer_netinfo_valid_ = false;
+  int64_t peer_netinfo_ms_ = 0;
+  PhyStats last_phy_{};
+  std::string last_verify_;
+  std::vector<uint8_t> tx_dump_;
+  bool tx_dump_on_ = false;
+  // calibration bookkeeping
+  struct Cal {
+    bool active = false;
+    int stage = 0;
+    int profile = 0;
+    int frames = 0;
+    int sent = 0, got = 0;
+    int64_t t0 = 0;
+    uint16_t tag = 0;
+    std::vector<Calibrator::BandResult> results;
+    bool done = false;
+    double noise_dbfs = -120, sig_dbfs = -120;
+    bool clipped = false;
+  } cal_;
+  friend class AcousticLink;
+};
+
+}  // namespace ni
+#endif

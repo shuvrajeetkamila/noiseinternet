@@ -1,0 +1,23 @@
+loopback PHY test: tx_render -> int16 PCM -> AcousticChannel -> rx_decode
+payload 120 B, 8 trials, target SNR 15.0 dB, ideal -> ideal, 0.5 m
+profile         snr_dB       ok    rawBER    fecBER burst_ms     B/s   evec%
+FSK-VOICE          7.4   3/8     1.27e-04  0.00e+00    530.0      74    0.00  rx: synced but bit stream unusable
+FSK-MID            7.5   3/8     1.64e-04  0.00e+00    507.5     236    0.00  rx: synced but bit stream unusable
+DBPSK-MID         18.8   8/8     2.48e-02  0.00e+00    666.7     180   27.82  
+DBPSK-WIDE        12.9   8/8     3.00e-02  0.00e+00    320.0     375   26.83  
+DQPSK-WIDE        13.0   1/8     2.70e-02  4.22e-01    173.3     692   22.99  frame decode failed after PHY
+QAM16-WIDE         9.1   6/8     1.12e-01  1.25e-01    113.3    1059   28.13  rx: declared length out of range
+QAM64-WIDE        10.4   0/8     1.07e-01  4.12e-01     93.3    1286   20.88  frame decode failed after PHY
+DBPSK-ULTRA       20.2   8/8     1.70e-02  0.00e+00    873.3     137   29.27  
+QAM16-ULTRA       19.3   5/8     1.27e-01  1.34e-01    266.7     450   27.70  rx: declared length out of range
+RAW-DBPSK-MID     20.3   3/8     1.85e-02  5.48e-02    346.7     346   24.37  frame decode failed after PHY
+FD-LOW-DBPSK      21.5   8/8     2.07e-02  0.00e+00    860.0      95   38.80  
+FD-HIGH-DBPSK     15.6   8/8     3.19e-02  0.00e+00    566.7     212   29.49  
+FD-LOW-QAM16      22.0   6/8     1.30e-01  1.26e-01    306.7     316   26.74  rx: declared length out of range
+FD-HIGH-QAM16     15.8   6/8     9.61e-02  1.25e-01    186.7     643   30.68  rx: declared length out of range
+DBPSK-MID-ECHO    20.0   8/8     1.53e-02  0.00e+00    933.3     129   29.14  
+DQPSK-WIDE-ECHO   17.1   2/8     2.71e-02  2.35e-01    248.0     484   22.72  frame decode failed after PHY
+
+channel: sim-channel[ideal->ideal, 0.50m, snr 15.0dB, sro 0ppm, multipath 0, agc off, tx 0dB]
+NOTE: simulated transducers only. This does not prove speaker/microphone behaviour
+      on any real device; it proves the modem, FEC and equaliser are self-consistent.
