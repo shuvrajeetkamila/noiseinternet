@@ -176,6 +176,11 @@ jobs:
             -Body $json | Out-Null
           Write-Host "posted commit comment"
           Write-Host $body
+      # The same eight ctest suites that gate A counts on Linux, built by MSVC against the Windows
+      # SDK. If this goes red, the "unit-tested" label in docs/STATUS.md no longer applies to this
+      # platform, and the job says so instead of shipping an exe nobody tested.
+      - name: Unit tests on MSVC
+        run: ctest --test-dir build-windows -C Release --output-on-failure
       - uses: actions/upload-artifact@v4
         if: success()
         with:
@@ -185,28 +190,82 @@ jobs:
 
   # ---------------------------------------------------------------- publish, only if everything above is green
   release:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    # `workflow_dispatch` cannot be triggered from the environment this project is developed in (the
+    # token gets HTTP 403 on the dispatch endpoint), so publishing is tied to the push that proves
+    # both platform builds instead. Same tag every time, files overwritten: there is exactly one
+    # "latest CI build" and it is always the one that matches the code at its tip.
+    if: needs.android.result == 'success' && needs.windows.result == 'success'
     runs-on: ubuntu-latest
     needs: [core-linux, android, windows]
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: '*'
-      - name: Publish the CI build as a pre-release (debug-signed APK, unsigned EXE - nothing more)
+      - name: Manifest - sizes, sha256, what is inside the APK
+        run: |
+          apk=$(find . -name '*.apk' | head -1)
+          exe=$(find . -name 'NoiseInternet.exe' | head -1)
+          test -n "$apk" && test -n "$exe" || { echo "an expected artifact vanished"; exit 1; }
+          cp "$apk" noiseinternet-debug.apk
+          cp "$exe" NoiseInternet.exe
+          {
+            echo "## CI build ${GITHUB_SHA}"
+            echo
+            echo "Built by \`.github/workflows/build.yml\` (run \`${GITHUB_RUN_ID}\`) from commit \`${GITHUB_SHA}\`."
+            echo
+            echo "Read this before installing anything:"
+            echo
+            echo "- the APK is signed with a **throwaway debug keystore created on the runner**; it is not a"
+            echo "  release signature and the key is gone when the runner is."
+            echo "- the EXE is **unsigned**: Windows SmartScreen will warn, because nothing vouches for it."
+            echo "- **the acoustic link has never carried a message over real speakers and a real"
+            echo "  microphone**, and the proxy/VPN legs are not verified (gates C, E, F in"
+            echo "  \`docs/STATUS.md\`). These binaries are a build, not a working internet-sharing product."
+            echo "- nothing here was tested on a phone or a PC with audio hardware; \`ni audit\` on the build"
+            echo "  host reports 0 audio devices."
+            echo
+            echo "| file | bytes | sha256 |"
+            echo "|---|---|---|"
+            for f in noiseinternet-debug.apk NoiseInternet.exe; do
+              printf "| %s | %s | %s |\n" "$f" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+            done
+            echo
+            echo '```'
+            echo "APK contents (the native core must be in there, or the build is hollow):"
+            unzip -l noiseinternet-debug.apk | grep -E 'lib/|classes.dex|AndroidManifest' | head -12
+            echo
+            echo "EXE:"
+            file NoiseInternet.exe 2>/dev/null || true
+            sha256sum noiseinternet-debug.apk NoiseInternet.exe
+            echo '```'
+          } > body.md
+          cat body.md
+      - name: Publish the pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-build
           prerelease: true
+          make_latest: 'false'
+          overwrite_files: true
           generate_release_notes: false
-          name: "CI build ${{ github.sha }}"
-          body: |
-            Built by `.github/workflows/build.yml` from `${{ github.sha }}`. This is NOT a release of a
-            working product: the acoustic link has no verified over-the-air transfer (see
-            `docs/STATUS.md` gates C/E/F/G), the APK is signed with a throwaway *debug* keystore created
-            on the runner, and the EXE is unsigned and will trip SmartScreen.
-            The build log on the run page is the evidence; the files are what the compiler produced.
+          name: 'NOISE INTERNET CI build (debug APK + Windows exe)'
+          body_path: body.md
           files: |
-            **/*.apk
-            **/NoiseInternet.exe
+            noiseinternet-debug.apk
+            NoiseInternet.exe
+      - name: Tell the commit where the artifacts went
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          url="https://github.com/${{ github.repository }}/releases/tag/ci-build"
+          body="## CI artifacts published"$'\n'"Release tag \`ci-build\`: $url"$'\n'"Commit: ${{ github.sha }}."$'\n'"Download the APK and the Windows EXE from that release page; the manifest there carries their sizes and sha256. Read the caveats in it before installing - this is a build, not a verified product."
+          curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
+            --data "$(python3 -c "import json,os;print(json.dumps({'body':os.environ['BODY']}))" )" \
+            -o /dev/null -w "comment http %{http_code}\n"
+        continue-on-error: true
+      - name: Same report as a job annotation (belt and braces)
+        run: echo "::notice::release $url" || true
