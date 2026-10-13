@@ -275,10 +275,18 @@ are accumulated into `raw_tx_` and the channel is applied to **the whole accumul
 an endpoint has several bursts queued - which is exactly what half-duplex retransmission produces - they
 are glued together with no inter-burst guard and processed as one long sound, while `ni phy test` and the
 WAV path hand the demodulator one padded burst at a time. The peer diagnostics agree with that reading:
-in the FD-LOW run, A's estimator reported **+23.7 dB** (it was hearing B cleanly) while B's sat on the
-−45 dB failure floor, `rtt_ms 0` (no ack ever applied), `retransmits 23`, `lost_frames 0`, and an earlier
+in the FD-LOW run (`reports/linksim.csv`, last row), A's estimator reported **+23.7369 dB** (it was hearing B cleanly) while B's sat on the
+−45 dB failure floor, `rtt_ms 0` (no ack ever applied), `retransmits 18`, `lost_frames 0`, `peer_online: false` on both sides, and an earlier
 DBPSK-WIDE run measured `measured_airtime_ms 1733` for a profile whose burst is 233 ms - a "burst" that was
-really seven of them concatenated.
+really about seven of them glued together. The saved record is `fdlow25-paced` in `reports/raw/linksim.jsonl`, where B's `measured_airtime_ms` is 2 686.67 ms for a 393 ms burst. A `+23.7369 dB` against B's −45 dB is the asymmetry to explain.
+
+A third theory was **tested and made things worse**, which is still information: inserting 1 024 samples
+of silence between pending chunks in `Node::pull_playback` (a guard interval, like the WAV tools'
+`--pad`) stopped pairing from completing at all on the profile where it previously succeeded. The
+likely mechanism is that the guard inflates `measured_airtime_ms`, and the half-duplex reply window is
+`4 x airtime_est` - so the window moves out of step with the peer. The change was reverted rather than
+left in the tree; a real fix has to bound bursts at the link layer (where the burst length is known) and
+re-measure airtime from the modem's own plan, not from received samples.
 
 Two theories were tested and are **wrong**, recorded so nobody re-tests them: the simulator has no
 self-interference (A's playback goes only to B's capture and vice versa, `sim.cpp` wire loop), and the

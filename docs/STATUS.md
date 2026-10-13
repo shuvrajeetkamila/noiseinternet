@@ -182,8 +182,9 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 1. **Gate C.** Get one 228-byte message across `ni linksim`. Work the three suspects in `RESULTS.md` §4:
    achievable demod SNR through the device model (measured −14 … −45 dB at nominal 35 dB), the
    turnaround/listen window, and `modem.cpp:426` ignoring the descriptor's modulation id.
-2. Register the tests with the physical-test harness and add a benchmark runner
-   (`scripts/run_benchmarks.sh`) so `RESULTS.md` can be regenerated in one command.
+2. One command to regenerate the evidence: `ni bench` already writes CSV + JSON by itself, and
+   `scripts/raw_to_csv.py` converts the self-test/linksim logs, but `ni selftest` / `ni calibrate` still
+   need `tee`, and there is no wrapper that runs all of them and no CI job. Add `scripts/run_benchmarks.sh`.
 3. **Fix the simulator's channel application before anything else on gate C**: apply the model per burst
    with a guard interval instead of to whole accumulated transmit blocks (`Node::pull_playback`), because
    `ni bench` proves the same profile is error-free burst-by-burst at the SNR linksim reports.
