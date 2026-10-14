@@ -162,7 +162,76 @@ jobs:
         continue-on-error: true
         run: ctest --test-dir build-windows -C Release --output-on-failure *>&1 |
           Tee-Object -FilePath ctest.log
-      - name: Post the Windows build and test transcript to the commit
+      - name: Package a standalone Windows bundle (exe + ni + redist fallback)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = 'bundle'
+          Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+          Remove-Item -Force NoiseInternet-windows-x64.zip -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $out, "$out/redist" | Out-Null
+          "pkg: bundling" | Out-File pkg.log
+          foreach ($n in @('NoiseInternet.exe','ni.exe')) {
+            $f = Get-ChildItem -Path build-windows -Recurse -Filter $n | Select-Object -First 1
+            if (-not $f) { "pkg: MISSING $n - refusing to publish a half bundle" | Out-File -Append pkg.log; exit 5 }
+            Copy-Item $f.FullName $out
+            "pkg: staged $n ($((Get-Item "$out\$n").Length) B)" | Out-File -Append pkg.log
+          }
+          Copy-Item packaging/windows/README-RUN.md $out
+          Copy-Item packaging/windows/NOTICE-redist.txt "$out/redist/NOTICE-redist.txt"
+          # Where the MSVC runtime DLLs live on this runner. Copied, not built: unmodified redist files.
+          $vs = ''
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { $vs = & $vswhere -latest -property installationPath }
+          $redist = ''
+          if ($vs) {
+            $cand = Get-ChildItem -Path "$vs\VC\Redist\MSVC" -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path "$($_.FullName)\x64\Microsoft.VC143.CRT" } | Select-Object -Last 1
+            if ($cand) { $redist = "$($cand.FullName)\x64\Microsoft.VC143.CRT" }
+          }
+          if ($redist) {
+            "pkg: redist source $redist" | Out-File -Append pkg.log
+            foreach ($d in @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')) {
+              if (Test-Path "$redist\$d") { Copy-Item "$redist\$d" "$out/redist"; "pkg: copied $d" | Out-File -Append pkg.log }
+              else { "pkg: NOT FOUND $d" | Out-File -Append pkg.log }
+            }
+          } else { "pkg: no Microsoft.VC143.CRT directory found (vswhere=[$vs])" | Out-File -Append pkg.log }
+          # Do not trust the CMake option - read the import table of the file that was actually linked.
+          $crt = 'unknown (dumpbin not found on this runner)'
+          $dumpbin = $null
+          if ($vs) { $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if ($dumpbin) {
+            $dep = & $dumpbin.FullName /dependents "$out\NoiseInternet.exe" | Out-String
+            $dlls = ($dep -split "`n" | ForEach-Object { if ($_ -match '([A-Za-z0-9_\-\.]+\.dll)') { $matches[1] } }) | Sort-Object -Unique
+            "pkg: NoiseInternet.exe imports: $($dlls -join ' ')" | Out-File -Append pkg.log
+            if ($dlls -contains 'VCRUNTIME140.dll' -or $dlls -contains 'MSVCP140.dll') {
+              $crt = 'DYNAMIC (/MD): the exe imports the CRT DLLs, so redist/ is required beside it'
+            } else {
+              $crt = 'STATIC (/MT): the exe imports no CRT DLL, so it is standalone; redist/ is a fallback only'
+            }
+          }
+          "pkg: crt: $crt" | Out-File -Append pkg.log
+          # BUILD-INFO.txt is generated from the bytes being shipped, never typed by hand.
+          $root = (Resolve-Path $out).Path
+          $lines = @(
+            'Noise Internet - Windows bundle (built by CI, not by hand)',
+            "commit: $env:GITHUB_SHA",
+            "built:  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC on $env:RUNNER_OS",
+            "crt:    $crt",
+            '',
+            'files (path, bytes, sha256):'
+          )
+          foreach ($f in (Get-ChildItem -Path $out -Recurse -File | Sort-Object FullName)) {
+            $rel = $f.FullName.Substring($root.Length + 1)
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $lines += ("  {0,-46} {1,9} B  {2}" -f $rel, $f.Length, $h)
+          }
+          $lines += '', 'Run it from a terminal inside this folder: README-RUN.md explains both this exe', 'and the Android apk. Nothing here has been tested against real speakers or a microphone.'
+          $lines | Set-Content -Encoding ascii "$out\BUILD-INFO.txt"
+          Get-Content "$out\BUILD-INFO.txt" | Out-File -Append pkg.log
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath NoiseInternet-windows-x64.zip -CompressionLevel Optimal
+          "pkg: NoiseInternet-windows-x64.zip = $((Get-Item NoiseInternet-windows-x64.zip).Length) B" | Out-File -Append pkg.log
+      - name: Post the Windows build, test and packaging transcript to the commit
         if: always()
         shell: pwsh
         env:
@@ -171,7 +240,7 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           $b = "## windows build (CI)`n`n``````"
-          foreach ($f in @('cfg.log','build.log','ctest.log')) {
+          foreach ($f in @('cfg.log','build.log','ctest.log','pkg.log')) {
             if (Test-Path $f) {
               $hits = Select-String -Path $f -Pattern 'error [A-Z]+[0-9]+|CMake Error|tests passed|tests failed|Failed +[0-9]' |
                 Select-Object -First 12 | ForEach-Object { $_.Line }
@@ -185,6 +254,11 @@ jobs:
                 if ($ctx) {
                   $b += "`n--- ctest failures ---`n" + (($ctx | Select-Object -First 60) -join "`n")
                 }
+              }
+              if ($f -eq 'pkg.log') {
+                # The packaging step's own report is short and is the only place the exe's real import
+                # table and per-file hashes get stated, so quote all of it rather than grepping.
+                $b += "`n--- pkg.log (full) ---`n" + ((Get-Content $f) -join "`n")
               }
             }
           }
@@ -200,6 +274,12 @@ jobs:
         with:
           name: windows-noiseinternet-exe
           path: NoiseInternet.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: windows-bundle
+          path: NoiseInternet-windows-x64.zip
           if-no-files-found: error
 
   # ---------------------------------------------------------------- publish on a green pair of platforms
@@ -221,9 +301,24 @@ jobs:
         run: |
           apk=$(find . -name '*.apk' | head -1)
           exe=$(find . -name 'NoiseInternet.exe' | head -1)
+          zip=$(find . -name 'NoiseInternet-windows-x64.zip' | head -1)
           test -n "$apk" && test -n "$exe" || { echo "an expected artifact vanished"; exit 1; }
           cp "$apk" noiseinternet-debug.apk
           cp "$exe" NoiseInternet.exe
+          files="noiseinternet-debug.apk NoiseInternet.exe"
+          if [ -n "$zip" ]; then
+            cp "$zip" NoiseInternet-windows-x64.zip
+            # One bundle for a person who just wants everything: the apk, the windows folder, and the
+            # same instructions at the top level so they are impossible to miss.
+            rm -rf combined && mkdir -p combined/windows combined/android
+            unzip -q NoiseInternet-windows-x64.zip -d combined/windows
+            cp noiseinternet-debug.apk combined/android/noiseinternet-debug.apk
+            cp packaging/windows/README-RUN.md combined/README-RUN.md
+            (cd combined && zip -qr ../noiseinternet-android-windows.zip .)
+            files="$files NoiseInternet-windows-x64.zip noiseinternet-android-windows.zip"
+          else
+            echo "WARNING: no windows bundle zip was produced; publishing the bare exe and apk only"
+          fi
           {
             echo "## CI build \${GITHUB_SHA}"
             echo
@@ -236,16 +331,22 @@ jobs:
             echo "  Play-Store-published app."
             echo "- The EXE is **unsigned**, so SmartScreen will warn: nothing vouches for the binary"
             echo "  beyond this repository and this build log."
+            echo "- The Windows zip is **standalone**: \`/MT\` links the C++ runtime into the exe, so no"
+            echo "  redistributable install is needed. \`redist/\` inside it holds unmodified copies of"
+            echo "  \`vcruntime140.dll\`, \`vcruntime140_1.dll\` and \`msvcp140.dll\` as a fallback for a"
+            echo "  \`-DNI_STATIC_RUNTIME=OFF\` build - see \`NOTICE-redist.txt\`. The bundle also contains"
+            echo "  \`ni.exe\` and \`README-RUN.md\` (how to run both this and the APK), and"
+            echo "  \`BUILD-INFO.txt\` with the import-table check and a sha256 per file."
             echo "- **No message has ever crossed real speakers and a real microphone.** Simulated"
             echo "  channel only (\`docs/STATUS.md\` gates B, C, F), the proxy and VPN legs are unverified"
             echo "  (gates E, D-partial), and \`ni audit\` on every build host here reports 0 audio devices."
             echo "- So: these binaries build, and the engine inside them passes its unit tests on Linux"
-            echo "  (8/8) and reports its own status; they are NOT a working internet-sharing product yet,"
+            echo "  and Windows (8/8 on both); they are NOT a working internet-sharing product yet,"
             echo "  and no rate quoted in this repository is an internet speed."
             echo
             echo "| file | bytes | sha256 |"
             echo "|---|---|---|"
-            for f in noiseinternet-debug.apk NoiseInternet.exe; do
+            for f in $files; do
               printf "| %s | %s | %s |\n" "$f" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
             done
             echo
@@ -254,6 +355,18 @@ jobs:
             unzip -l noiseinternet-debug.apk | grep -E 'lib/|classes.dex|AndroidManifest.xml' | head -14
             echo
             file NoiseInternet.exe 2>/dev/null || true
+            if [ -n "$zip" ]; then
+              echo
+              echo "Windows bundle contents:"
+              unzip -l NoiseInternet-windows-x64.zip | sed -n '1,40p'
+              echo
+              echo "What the shipped DLLs actually are:"
+              rm -rf peek && mkdir -p peek && unzip -q NoiseInternet-windows-x64.zip -d peek
+              file peek/redist/*.dll 2>/dev/null || echo "(no redist DLLs in this bundle)"
+              echo
+              echo "Combined bundle contents:"
+              unzip -l noiseinternet-android-windows.zip | sed -n '1,40p'
+            fi
             echo "\`\`\`"
           } > body.md
           cat body.md
@@ -265,11 +378,13 @@ jobs:
           make_latest: 'false'
           overwrite_files: true
           generate_release_notes: false
-          name: 'NOISE INTERNET CI build (debug APK + Windows EXE)'
+          name: 'NOISE INTERNET CI build (debug APK + standalone Windows bundle)'
           body_path: body.md
           files: |
             noiseinternet-debug.apk
             NoiseInternet.exe
+            NoiseInternet-windows-x64.zip
+            noiseinternet-android-windows.zip
       - name: Tell the commit where the artifacts went
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -279,8 +394,10 @@ jobs:
             echo
             echo "Pre-release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/ci-build"
             echo
-            echo "Built from \`${GITHUB_SHA}\`. APK and Windows EXE are attached there with sizes and"
-            echo "sha256, next to the caveats (debug keystore, unsigned EXE, no over-the-air test)."
+            echo "Built from \`${GITHUB_SHA}\`. Attached there: the debug APK, the bare EXE, the standalone"
+            echo "Windows bundle zip (exe + ni.exe + README-RUN.md + redist/ + BUILD-INFO.txt) and the"
+            echo "combined Android+Windows zip, each with its size and sha256 next to the caveats (debug"
+            echo "keystore, unsigned EXE, no over-the-air test)."
           } > comment.md
           python3 - <<'PY'
           import json, os, urllib.request

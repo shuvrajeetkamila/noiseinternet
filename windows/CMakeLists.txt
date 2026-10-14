@@ -1,8 +1,9 @@
 # Windows build of the NOISE INTERNET core + NoiseInternet.exe
 #
-# NEVER BUILT: the environment this project was written in has no MSVC, no MinGW-w64 and no zig, so
-# this file has never been executed. It is written to be run, not to claim a result. If it fails to
-# configure or compile, that is a bug to fix on a Windows machine, not something to work around here.
+# This file IS executed - by CI (.github/workflows/build.yml, windows job) with MSVC 19.51 on
+# windows-latest, which is also where every compile error in this project's Windows half was found:
+# the development sandbox has no MSVC, MinGW-w64 or zig, so nothing here was ever run locally. The
+# measured state of the build is in artifacts/README.md, not asserted here.
 cmake_minimum_required(VERSION 3.16)
 project(NoiseInternetWindows CXX)
 
@@ -17,6 +18,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
   add_compile_options(/W3 /EHsc /utf-8)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+  # Standalone exe. The default MSVC CRT is the DLL one (/MD), which makes NoiseInternet.exe depend on
+  # vcruntime140.dll, vcruntime140_1.dll and msvcp140.dll being present on the machine - on a clean
+  # Windows install they are not, and a loose .exe copied out of a zip has no installer to put them
+  # there. /MT links the CRT into the binary instead, so the artifact needs nothing beside it.
+  # Turn it off (-DNI_STATIC_RUNTIME=OFF) to get the smaller /MD build that does need the redist.
+  option(NI_STATIC_RUNTIME "link the MSVC runtime statically (/MT) so the exe is standalone" ON)
+  if(NI_STATIC_RUNTIME)
+    foreach(_v CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+      string(REPLACE "/MDd" "/MTd" ${_v} "${${_v}}")
+    endforeach()
+    foreach(_v CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE
+               CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_RELWITHDEBINFO
+               CMAKE_C_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_MINSIZEREL)
+      string(REPLACE "/MD" "/MT" ${_v} "${${_v}}")
+    endforeach()
+    message(STATUS "MSVC runtime: static (/MT) - the exe will not need vcruntime140/msvcp140")
+  else()
+    message(STATUS "MSVC runtime: dynamic (/MD) - the redist DLLs must ship next to the exe")
+  endif()
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()

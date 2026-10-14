@@ -1,10 +1,18 @@
 # Building and running NoiseInternet.exe (Windows)
 
-**Status of this directory: source only, never compiled.** The machine this project was written on is a
-Linux sandbox with no MSVC, no MinGW-w64 and no `zig`, so nothing below has been executed, and no `.exe`
-exists in this repository. Do not read the presence of these files as "the Windows app works" — the
-measured state of the whole project is [`../reports/RESULTS.md`](../reports/RESULTS.md) and
-[`../docs/STATUS.md`](../docs/STATUS.md).
+**Status: compiled, linked and unit-tested by CI (8/8 ctest suites on MSVC); never run on audio
+hardware.** The machine this project was written on is a Linux sandbox with no MSVC, no MinGW-w64 and no
+`zig`, so nothing below was executed locally - the compiler that checked it is GitHub Actions' Windows
+runner, and the published binaries are described in
+[`../artifacts/README.md`](../artifacts/README.md). Do not read any of that as "the Windows app works over
+sound": no message has crossed a speaker and a microphone yet. The measured state of the whole project is
+[`../reports/RESULTS.md`](../reports/RESULTS.md) and [`../docs/STATUS.md`](../docs/STATUS.md).
+
+**The exe is standalone.** `NI_STATIC_RUNTIME` (ON by default) links the C++ runtime into the binary with
+`/MT`, so `NoiseInternet.exe` needs no Visual C++ redistributable; the status screen prints which CRT it
+was built against, and the CI zip ships the three runtime DLLs under `redist/` anyway, as a fallback for a
+`-DNI_STATIC_RUNTIME=OFF` build. To run what you downloaded: `README-RUN.md` at the root of the zip, in
+the repository as [`../packaging/windows/README-RUN.md`](../packaging/windows/README-RUN.md).
 
 ## Layout
 

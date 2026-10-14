@@ -6,8 +6,9 @@
 // use, and all audio goes through WasapiEngine. Nothing here pretends: if there is no capture
 // endpoint, the status line says "NOT TESTED" and the transfer commands return the engine's error.
 //
-// NEVER COMPILED - see windows/BUILD.md. The console layout mirrors the field list the Android UI
-// shows, so a physical test can be read off either machine.
+// Compiled and unit-tested by CI (MSVC, 8/8 ctest suites) - see windows/BUILD.md. It has still never
+// been run against a sound card: no build host here has one. The console layout mirrors the field list
+// the Android UI shows, so a physical test can be read off either machine.
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -50,6 +51,12 @@ void print_status(App& app) {
   printf("profile           : %s (id %d, %s)\n", s.profile_name.c_str(), s.profile_id,
          s.modulation.c_str());
   printf("sample rate       : %.0f Hz\n", s.sample_rate);
+#if defined(_DLL)
+  printf("c runtime         : dynamic (/MD) - vcruntime140.dll, vcruntime140_1.dll and msvcp140.dll\n"
+         "                    must sit next to this exe; see redist/ in the downloaded zip\n");
+#else
+  printf("c runtime         : static (/MT) - standalone exe, no CRT DLLs needed\n");
+#endif
   printf("audio devices     : mic=%s  speaker=%s\n", s.input_device.c_str(), s.output_device.c_str());
   printf("peer              : %s (last heard %lld ms ago)\n", s.peer_online ? "ONLINE" : "offline",
          (long long)s.peer_seen_ms);
@@ -137,13 +144,17 @@ void usage() {
       "\n"
       "  NoiseInternet.exe [--giver|--receiver] [--mic <endpoint-id>] [--spk <endpoint-id>]\n"
       "                    [--profile N] [--fs 48000] [--secret PASSPHRASE] [--session N]\n"
-      "                    [--proxy-port 8471] [--duplex] [--list-devices]\n"
+      "                    [--proxy-port 8471] [--proxy-token TOKEN] [--duplex] [--list-devices]\n"
       "                    [--wav-in f.wav --wav-out g.wav]   (development: file transport, NOT\n"
       "                     an acoustic test; the status screen marks it as such)\n"
       "\n"
       "Then, interactively:  a = calibrate   l = link test (228 B)   i = internet test\n"
       "                     r = switch role   p = profiles            s = status json\n"
-      "                     q = quit\n"
+      "                     q = quit   (Enter alone reprints the status screen)\n"
+      "\n"
+      "A client on this machine reaches the receiver's proxy with\n"
+      "  curl -x http://127.0.0.1:8471 -H \"Proxy-Authorization: Noise <token>\" http://example.com/\n"
+      "Browsers cannot send that header (it is not Basic auth), so expect curl or ni.exe, not Chrome.\n"
       "\n"
       "Nothing here generates a result: every printed number comes from the engine.\n");
 }
@@ -213,6 +224,14 @@ int main(int argc, char** argv) {
     } else if (a == "--proxy-port") {
       if (next(v)) return 2;
       app.cfg.proxy_port = atoi(v.c_str());
+    } else if (a == "--proxy-token") {
+      // The receiver's proxy authenticates clients with a bearer token ("Proxy-Authorization: Noise T").
+      // Left unset the core generates one and only its 4-character prefix reaches the status screen,
+      // which is right for security and useless for a client that needs the whole string - so the local
+      // machine that wants to use the proxy sets its own token here. Documented as defect 27: the
+      // Android build has no equivalent field, so its proxy can only be driven from inside the app.
+      if (next(v)) return 2;
+      app.cfg.proxy_token = v;
     } else if (a == "--duplex") {
       app.cfg.duplex = 1;
     } else if (a == "--wav-in") {

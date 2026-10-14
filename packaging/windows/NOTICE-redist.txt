@@ -1,0 +1,28 @@
+Files in redist/
+----------------
+vcruntime140.dll
+vcruntime140_1.dll
+msvcp140.dll
+
+Source: copied unmodified from the Microsoft Visual C++ redistributable directory of the build machine
+  (<Visual Studio>\VC\Redist\MSVC\<version>\x64\Microsoft.VC143.CRT).
+  Their sizes and sha256 for this particular build are listed in BUILD-INFO.txt next to this file.
+
+Do you need them?
+----------------
+No, not for the NoiseInternet.exe in this zip. That binary is linked with /MT (static runtime), so the C++
+runtime is inside it. They are included so that a build configured with -DNI_STATIC_RUNTIME=OFF - which
+links /MD and therefore imports exactly these three DLLs - can be run by copying them next to the exe
+instead of installing the redistributable system-wide. The exe's own status screen prints which of the two
+it is, and BUILD-INFO.txt records what dumpbin saw in the import table of this specific file.
+
+License terms
+-------------
+These DLLs are Microsoft's, not this project's, and they are governed by the Microsoft Visual C++
+Redistributable License Terms, which permit distributing the runtime files as part of your own application
+in unmodified binary form (that is exactly what this zip does). Full text:
+https://visualstudio.microsoft.com/license-terms/ . Nothing else in this zip is Microsoft code:
+the engine, the app, the build scripts and the unit tests are in this repository, and the shared core this
+exe links is the same source the Linux and Android builds use.
+
+This notice exists because shipping someone else's runtime DLLs should be explained, not assumed.
