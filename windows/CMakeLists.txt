@@ -80,6 +80,18 @@ add_executable(NoiseInternet
 target_link_libraries(NoiseInternet PRIVATE ni_core)
 # ole32: COM + CoTaskMemFree.  uuid: the __uuidof/IID symbols.  ksuser: KSDATAFORMAT_* subtypes.
 target_link_libraries(NoiseInternet PRIVATE ole32 uuid ksuser)
+# The console front end is the developer's tool (device ids, file mode, key-driven tests); the windowed
+# build below is what ships as NoiseInternet.exe, so this one is renamed rather than dropped.
+set_target_properties(NoiseInternet PROPERTIES OUTPUT_NAME "NoiseInternet-console")
+
+# The windowed app: controls for role, both audio endpoints, profile, session id, passphrase and the
+# match code, plus buttons for the measured tests. WIN32 => /SUBSYSTEM:WINDOWS, wWinMain, no console
+# window to apologise for. Plain user32 controls on purpose: no Qt, no .NET, nothing to install, and the
+# static CRT keeps it a single file. --ui-check lets CI prove the window and its controls exist on a
+# machine that has no speaker to test with.
+add_executable(NoiseInternetGui WIN32 ${CMAKE_CURRENT_LIST_DIR}/src/NoiseInternet/gui_main.cpp)
+target_link_libraries(NoiseInternetGui PRIVATE ni_core ole32 uuid ksuser user32 gdi32 shell32)
+set_target_properties(NoiseInternetGui PROPERTIES OUTPUT_NAME "NoiseInternet")
 
 # The CLI too, so the same machine can run `ni selftest` / `ni render` / `ni decode` against the same
 # core it just shipped in the GUI-less app.

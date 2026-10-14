@@ -474,6 +474,10 @@ StatusSnapshot Node::snapshot() const {
     }
   }
   s.tunnel_up = rproxy_ != nullptr && rproxy_->streams_open() >= 0 && running_;
+  if (link_ && link_->pairing()) {
+    s.pairing = link_->pairing()->state_name();
+    s.sas = link_->pairing()->sas();
+  }
   s.tunnel_detail = rproxy_ ? rproxy_->describe() : std::string("no local proxy on this role");
   if (gproxy_) s.tunnel_detail += " [giver: " + gproxy_->describe() + "]";
   s.internet_ok = peer_netinfo_valid_ && peer_netinfo_.http_ok;
@@ -495,6 +499,7 @@ std::string StatusSnapshot::to_json() const {
     << ", \"state_name\": \"" << state_name << "\", \"running\": " << (running ? "true" : "false")
     << ", \"profile\": \"" << profile_name << "\", \"profile_id\": " << profile_id
     << ", \"modulation\": \"" << modulation << "\", \"sample_rate\": " << sample_rate
+    << ", \"pairing\": \"" << pairing << "\", \"sas\": \"" << sas << "\""
     << ", \"input_device\": \"" << input_device << "\", \"output_device\": \"" << output_device
     << "\", \"peer_online\": " << (peer_online ? "true" : "false") << ", \"peer_seen_ms\": " << peer_seen_ms
     << ", \"session_ms\": " << session_ms << ", \"snr_db\": " << snr_db << ", \"rssi_dbfs\": " << rssi_dbfs

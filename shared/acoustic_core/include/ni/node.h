@@ -44,6 +44,12 @@ struct NodeConfig {
 
 struct StatusSnapshot {
   std::string name, role, state_name;
+  // Pairing is part of the status a UI has to show, not an extra: the match code (SAS words) is the
+  // only thing a human can compare between the two ends to know the "encrypted" claim means something.
+  // The Windows GUI and the Android panel both read these, and the fields used to exist only inside the
+  // diagnostics JSON - which is why neither UI could show them (they are here so both can).
+  std::string pairing = "none";   // "none" | "wait-challenge" | "wait-response" | "paired" | "failed"
+  std::string sas;                // 4-word short authentication string, empty until paired
   int state = NI_ST_IDLE;
   bool running = false;
   int profile_id = 0;

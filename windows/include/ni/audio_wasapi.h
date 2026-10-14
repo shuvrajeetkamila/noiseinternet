@@ -6,8 +6,10 @@
 // `ni_audio_enumerate()` forward here; without that define the core reports "no audio
 // enumeration on this platform build" and the UI must show NOT TESTED instead of a device list.
 //
-// STATUS: never compiled. There is no Windows toolchain in the environment where this project was
-// written (see docs/STATUS.md, gate G), so treat this as reviewed source, not as a working driver.
+// STATUS: compiled by CI with MSVC (this is where five API misuses were found and fixed: PROPVARIANT,
+// GetDevicePeriod, the Initialize session-GUID argument, SPEAKER_* masks, buffer-period units). It has
+// never been run against audio hardware, because no build host here has any - so treat it as "compiles and
+// is unit-tested", not as "a driver proven on a sound card".
 #ifndef NI_AUDIO_WASAPI_H
 #define NI_AUDIO_WASAPI_H
 #include <string>
