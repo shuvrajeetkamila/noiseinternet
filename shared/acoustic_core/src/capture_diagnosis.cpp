@@ -89,7 +89,9 @@ int ni_diagnose_capture(const float* x, size_t n, double fs, int profile_id, Cap
     if (ni_fft_init(&f, N)) {
       std::vector<float> acc((size_t)N, 0.f), win((size_t)N);
       for (int i = 0; i < N; ++i)
-        win[(size_t)i] = (float)(0.5 - 0.5 * cos(2.0 * M_PI * i / (N - 1)));   // Hann
+        // NI_PI, not M_PI: M_PI is a GNU extension that MSVC does not define without _USE_MATH_DEFINES,
+        // which is exactly the sort of difference that turns into a red Windows job (it did).
+        win[(size_t)i] = (float)(0.5 - 0.5 * cos(2.0 * NI_PI * i / (N - 1)));   // Hann
       int used = 0;
       // Which frames to average: the loudest ones, but never more than a quarter of the buffer, so a
       // recording that is *all* burst (a rendered file, a loopback capture) is still measured instead of
