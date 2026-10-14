@@ -233,8 +233,8 @@ struct App {
           int rc = node->test_internet(now, "http://example.com/", &iv);
           out = fmt(L"internet test: rc=%d ok=%ls", rc, iv.ok ? L"yes" : L"no");
           for (size_t i = 0; i < iv.stages.size(); ++i)
-            out += fmt(L"\n  %hs %.0f ms  %hs  [%s]", iv.stages[i].name.c_str(), iv.stages[i].ms,
-                       iv.stages[i].ok ? "ok" : "FAIL", "");
+            out += fmt(L"\n  %-22hs %7.0f ms  %-4hs  %hs", iv.stages[i].name.c_str(), iv.stages[i].ms,
+                       iv.stages[i].ok ? "ok" : "FAIL", iv.stages[i].detail.c_str());
           if (!iv.ok) out += L"\n  which stage failed above is the result: no internet path, no claim.";
         }
       }

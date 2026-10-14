@@ -37,12 +37,22 @@ Built by CI from the tip of the working branch and published as the pre-release 
 
 - `noiseinternet-debug.apk` - Android 6.0+, arm64-v8a and x86_64, **debug-signed** with a throwaway key that
   no longer exists.
-- `NoiseInternet-windows-x64.zip` - the standalone Windows exe (C++ runtime linked in, so no redistributable
-  to install; `dumpbin /dependents` in CI verifies that rather than assuming it), `ni.exe`,
-  `README-RUN.md`, `NOTICE-redist.txt`, `BUILD-INFO.txt` with a hash per file, and `redist/` holding
-  `vcruntime140.dll`, `vcruntime140_1.dll` and `msvcp140.dll` for a dynamically-linked build.
+- `NoiseInternet-windows-x64.zip` - the standalone Windows app (C++ runtime linked in, so no redistributable
+  to install; `dumpbin /dependents` in CI verifies that rather than assuming it). `NoiseInternet.exe` in it is
+  the **windowed** app: role radios, the machine's real microphones and speakers in drop-downs, profile,
+  session id, passphrase, a read-only **match code** field, Start/Stop/Switch role/Calibrate/Link test/
+  Internet test, a measured status panel and an engine log. `NoiseInternet-console.exe` is the same app from
+  a terminal (`--list-devices`, `--wav-*`, single-key tests), plus `ni.exe`, `README-RUN.md`,
+  `NOTICE-redist.txt`, `ui-check.txt` (the control inventory and endpoint count the build agent measured
+  when it ran the window), `BUILD-INFO.txt` with a hash per file, and `redist/` holding `vcruntime140.dll`,
+  `vcruntime140_1.dll` and `msvcp140.dll` for a dynamically-linked build.
 - `noiseinternet-android-windows.zip` - both of the above plus the instructions at the top level.
-- `NoiseInternet.exe` - the bare executable, for when you already have the rest.
+- `NoiseInternet.exe` - the bare windowed app, for when you already have the rest.
+
+Both roles exist on both platforms and either machine can be the one that gives the internet: the two ends
+exchange bursts in both directions the whole time, and `Start` / `Switch role` change only *who fetches*.
+What is not finished is the last mile of the tunnel - see `packaging/windows/README-RUN.md`, "Who gives, who
+receives, and which way the bytes go" - so this is not yet a working "share my internet" product.
 
 Unsigned, debug-signed, and untested on hardware. Every green push republishes them with new hashes, so
 verify a download against the manifest on that page rather than against a number quoted in a README.

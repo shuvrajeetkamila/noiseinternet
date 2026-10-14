@@ -171,7 +171,7 @@ jobs:
           Remove-Item -Force NoiseInternet-windows-x64.zip -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $out, "$out/redist" | Out-Null
           "pkg: bundling" | Out-File pkg.log
-          foreach ($n in @('NoiseInternet.exe','ni.exe')) {
+          foreach ($n in @('NoiseInternet.exe','NoiseInternet-console.exe','ni.exe')) {
             $f = Get-ChildItem -Path build-windows -Recurse -Filter $n | Select-Object -First 1
             if (-not $f) { "pkg: MISSING $n - refusing to publish a half bundle" | Out-File -Append pkg.log; exit 5 }
             Copy-Item $f.FullName $out
@@ -179,6 +179,24 @@ jobs:
           }
           Copy-Item packaging/windows/README-RUN.md $out
           Copy-Item packaging/windows/NOTICE-redist.txt "$out/redist/NOTICE-redist.txt"
+          # Run the window itself, not just the linker. --ui-check creates the real top-level window,
+          # creates every control, enumerates the machine's real audio endpoints, writes ui-check.txt and
+          # exits. A front end whose controls fail to appear is exactly what "it compiled" never catches,
+          # and a build agent with no speaker is exactly the machine where the endpoint count has to come
+          # back as zero instead of being papered over. Bounded at 60 s so a stuck message loop cannot hold
+          # the release job hostage.
+          $p = Start-Process -FilePath "$out\NoiseInternet.exe" -ArgumentList '--ui-check' -PassThru -WorkingDirectory $out -WindowStyle Hidden
+          if ($p.WaitForExit(60000)) {
+            "pkg: ui-check exited with code $($p.ExitCode) (0 = window and every control created)" | Out-File -Append pkg.log
+          } else {
+            $p.Kill()
+            "pkg: ui-check TIMED OUT after 60 s and was killed - do not ship this exe unexamined" | Out-File -Append pkg.log
+          }
+          if (Test-Path "$out\ui-check.txt") {
+            Get-Content "$out\ui-check.txt" | Out-File -Append -Encoding utf8 pkg.log
+          } else {
+            "pkg: ui-check wrote no ui-check.txt (window creation probably failed; exit code above)" | Out-File -Append pkg.log
+          }
           # Where the MSVC runtime DLLs live on this runner. Copied, not built: unmodified redist files.
           $vs = ''
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -211,6 +229,13 @@ jobs:
             }
           }
           "pkg: crt: $crt" | Out-File -Append pkg.log
+          # The GUI exe is one linked file and the console exe is another; a claim about one says nothing
+          # about the other, so the console build gets its own import line.
+          if ($dumpbin) {
+            $dep2 = & $dumpbin.FullName /dependents "$out\NoiseInternet-console.exe" | Out-String
+            $dlls2 = ($dep2 -split "`n" | ForEach-Object { if ($_ -match '([A-Za-z0-9_\-\.]+\.dll)') { $matches[1] } }) | Sort-Object -Unique
+            "pkg: NoiseInternet-console.exe imports: $($dlls2 -join ' ')" | Out-File -Append pkg.log
+          }
           # BUILD-INFO.txt is generated from the bytes being shipped, never typed by hand.
           $root = (Resolve-Path $out).Path
           $lines = @(
@@ -395,9 +420,10 @@ jobs:
             echo "Pre-release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/ci-build"
             echo
             echo "Built from \`${GITHUB_SHA}\`. Attached there: the debug APK, the bare EXE, the standalone"
-            echo "Windows bundle zip (exe + ni.exe + README-RUN.md + redist/ + BUILD-INFO.txt) and the"
-            echo "combined Android+Windows zip, each with its size and sha256 next to the caveats (debug"
-            echo "keystore, unsigned EXE, no over-the-air test)."
+            echo "Windows bundle zip (NoiseInternet.exe graphical app + NoiseInternet-console.exe +"
+            echo "ni.exe + README-RUN.md + ui-check.txt + redist/ + BUILD-INFO.txt) and the combined"
+            echo "Android+Windows zip, each with its size and sha256 next to the caveats (debug keystore,"
+            echo "no code signature, no over-the-air test)."
           } > comment.md
           python3 - <<'PY'
           import json, os, urllib.request

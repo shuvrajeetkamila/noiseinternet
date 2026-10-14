@@ -134,14 +134,18 @@ unpaired node, FFI input validation, the 16-entry profile table the spinners ren
 `ni_abi_render` -> `ni_abi_decode` round trip of a 40-byte payload. That is the layer the JNI bridge and
 the Win32 front end call, and it is green.
 
-Not proved: that any of it compiles, installs, records, plays, opens a tunnel or moves a byte. Two
-independent blockers, each written into the platform's `BUILD.md`: no JDK / Android SDK / NDK, so no APK
-and no signature of any kind (not "debug-signed" - nothing was signed); and no MSVC / MinGW / `zig`, so no
-EXE. Concretely, the platform code has never been near a compiler: while writing the WASAPI backend it
-turned out that the core's `#if defined(NI_WITH_WASAPI)` branch in `wav.cpp` called
-`ni_wasapi_enumerate(out, ...)` with `out` as an **unnamed parameter**, so the Windows build could not have
-compiled at all. Fixed here, but it is the measure of how thin the coverage of these directories is -
-`ni audit` reports `audio backend: not compiled in`, and no `AudioRecord` path has ever run either.
+Not proved: that any of it installs, hears, plays, opens a tunnel or moves a byte over air. The compile
+half of that sentence is no longer open - CI builds both platforms (see gate G and gap 6) and the reason it
+matters is visible in the history: the WASAPI backend, written in a sandbox with no toolchain, called
+`ni_wasapi_enumerate(out, ...)` with `out` as an **unnamed parameter**, so it could not have compiled at
+all; the first MSVC job then produced 31 more errors of the same kind, and the first Android job 5 Kotlin
+ones. What a compiler cannot test is what the apps do with a sound card, so the Windows front end gained an
+honest middle step: `NoiseInternet.exe --ui-check` creates the real window, creates every control,
+enumerates the machine's real endpoints and writes the inventory to `ui-check.txt`, which ships in the
+bundle. The build agents report 0 audio endpoints, which is the correct answer for a machine with no sound
+card and is printed as such rather than papered over. The shipped `NoiseInternet.exe` is now that windowed
+front end (role, devices, profile, session, passphrase, match code, test buttons); the terminal front end
+ships beside it as `NoiseInternet-console.exe`.
 
 How to build each one, and what to expect on the first attempt:
 [`../android/BUILD.md`](../android/BUILD.md), [`../windows/BUILD.md`](../windows/BUILD.md).
@@ -160,7 +164,7 @@ question, this table is authoritative.
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
 | E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | `ni demo` (proxy on 127.0.0.1 + `curl` through it, giver fetches a real URL) runs but never pairs: `giver=wait-response receiver=wait-challenge` on FD-HIGH at three distances, with and without TX pacing - defect 21, a defect in that harness, since `ni linksim` pairs on the same build and profile. No proxied byte has been counted anywhere; no claim of internet sharing is made. |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
-| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **PARTIAL** | CI builds both from this branch and publishes four assets on the `ci-build` pre-release: <https://github.com/shuvrajeetkamila/noiseinternet/releases/tag/ci-build> - the debug APK (4 093 449 B, NDK-r26 core for arm64-v8a + x86_64 inside, keystore created and destroyed on the runner), a **standalone** `NoiseInternet.exe` (630 272 B, MSVC 19.51, WASAPI in, `/MT` confirmed from its own import table rather than from the build option), a Windows bundle zip (`ni.exe`, `README-RUN.md`, `BUILD-INFO.txt`, unmodified CRT DLLs under `redist/`), and a combined android+windows zip. All four are rebuilt and republished on every green push, with sha256 generated on the runner, so the release body is the authority and `artifacts/README.md` explains the design. **Still not done: installing or running either on a device, the VpnService tunnel, and release signing.** Tests are 8/8 on both platforms - the Windows job is what caught a use-after-free that Linux masked (defects 24-25) |
+| G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **PARTIAL** | CI builds both from this branch and publishes four assets on the `ci-build` pre-release: <https://github.com/shuvrajeetkamila/noiseinternet/releases/tag/ci-build> - the debug APK (NDK-r26 core for arm64-v8a + x86_64 inside, keystore created and destroyed on the runner), a **standalone** `NoiseInternet.exe` that is now the **windowed** app (role radios, WASAPI-fed device lists, profile, session, passphrase, a read-only match-code field, Start/Stop/Switch role/Calibrate/Link test/Internet test, measured status panel; `/MT` confirmed from the exe's own import table rather than from the build option), `NoiseInternet-console.exe` for the terminal, a Windows bundle zip (`ni.exe`, `README-RUN.md`, `BUILD-INFO.txt`, `ui-check.txt`, unmodified CRT DLLs under `redist/`), and a combined android+windows zip. The packaging step **runs** the window (`--ui-check`, 60 s bound) and ships the control inventory it wrote, so "the controls exist" is measured per build instead of asserted; on a build agent the same file records 0 audio endpoints, which is why no acoustic claim comes with it. All four assets are rebuilt and republished on every green push, with sha256 generated on the runner, so the release body is the authority and `artifacts/README.md` explains the design. **Still not done: installing or running either on a device, the VpnService tunnel, and release signing.** Tests are 8/8 on both platforms - the Windows job is what caught a use-after-free that Linux masked (defects 24-25) |
 | H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | `protocol/modulation_profiles.json` now exists and is generated from the C++ table by `ni profiles --json`, so the spec file and the code agree (16 profiles); `reports/bench_sweep.csv`/`.json` and `reports/raw/selftest_snr25_streaming.txt` were re-run after the channel-model rework (defect 19) so the published PHY numbers match the code in this tree. Otherwise this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
 
 ## What is explicitly *not* claimed
@@ -197,8 +201,12 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 
 0. **Gate G follow-ups.** Install the CI APK on a phone and run the CI EXE on a Windows box with a
    speaker and a microphone: that is the only thing left standing between the current artifacts and
-   gates E/F. The cheap code task here is defect 27 - a proxy-token field in the Android config, without
-   which nothing outside the app can authenticate to its proxy (the Windows side already has `--proxy-token`).
+   gates E/F. `packaging/windows/README-RUN.md` is the procedure, and the first thing to try in the window
+   is **Start** on both ends followed by comparing the four-word **match code**, which now appears on both
+   screens (the snapshot carries the SAS; before this only the diagnostics JSON did, so no front end could
+   display it). The cheap code task here is defect 27 - a proxy-token field in the Android config, without
+   which nothing outside the app can authenticate to its proxy (the Windows console build already has
+   `--proxy-token`, and the window still lacks it).
 1. **Gate C, remaining half.** Pairing under loss (defect 26) is the cheapest hard thing left: the counters already say the giver's bursts never arrive, so start from the sim's loss injection, not from the handshake.
    Next, the 82-byte-profile 2 kB run and multipath, which now each succeed 1 trial in 3 - a retry budget that gives up (defect 22) is plausibly all that separates them. A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver

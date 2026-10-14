@@ -1,23 +1,47 @@
 # Running Noise Internet — Windows exe and Android apk
 
-Read the first two sections before you plug anything in. They are short and they are the difference
+Read the first three sections before you plug anything in. They are short and they are the difference
 between a useful evening and a confusing one.
 
 ## What is in this zip
 
 | file | what it is |
 |---|---|
-| `NoiseInternet.exe` | the Windows app: same engine, real WASAPI audio, console UI. **Standalone** — built with the C++ runtime linked in (`/MT`), so you do not need to install the Visual C++ redistributable. |
-| `ni.exe` | the same engine as a command-line tool: `ni profiles`, `ni selftest`, `ni linksim`, `ni audit`, `ni demo`. Nothing here generates fake results; `ni audit` on a machine with no sound hardware honestly reports 0 devices. |
+| `NoiseInternet.exe` | the Windows app: **a window with controls**, not a terminal. Same engine as everything else here, real WASAPI audio. Pick a role, pick your microphone and speaker, type a session id and a passphrase, press **Start**. Buttons run the measured tests; the status panel shows what the engine actually measured. **Standalone** — the C++ runtime is linked in (`/MT`), so you do not need to install the Visual C++ redistributable. |
+| `NoiseInternet-console.exe` | the same app driven from a terminal, for the things a window is awkward for: `--list-devices` prints every endpoint id, `--wav-in/--wav-out` runs the codec through files, single keys drive the tests. See "The same thing from a terminal" below. |
+| `ni.exe` | the engine as a command-line tool: `ni profiles`, `ni selftest`, `ni linksim`, `ni audit`, `ni demo`. `ni audit` on a machine with no sound card honestly reports 0 devices. |
+| `ui-check.txt` | what the window looked like on the machine that built this zip: the top-level window, every control it created, and how many audio endpoints that machine offered (a build agent has none — that is a real answer, not a defect). Written by `NoiseInternet.exe --ui-check`. |
 | `redist/` | `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`, copied unmodified from Microsoft's redistributable on the build machine. **The exe in this zip does not need them.** They are here so a build made with `-DNI_STATIC_RUNTIME=OFF` (the smaller, dynamically-linked variant) can run by dropping them next to it. See `NOTICE-redist.txt`. |
-| `BUILD-INFO.txt` | commit the binaries were built from, sizes, sha256 of every file in the zip, and the result of checking the exe's actual DLL imports. |
+| `BUILD-INFO.txt` | commit the binaries were built from, sizes, sha256 of every file in the zip, and the result of checking the exes' actual DLL imports. |
+
+## Who gives, who receives, and which way the bytes go
+
+This is the part people get wrong, so it is worth stating plainly.
+
+- **Traffic is two-way in both roles.** Whatever else is happening, the two ends are constantly
+  exchanging bursts: frames, acknowledgements, retransmission requests, pairing challenges, keepalives,
+  measured link state. A giver transmits *and* receives. A receiver transmits *and* receives.
+- **`GIVER` / `RECEIVER` describe where the internet is, not the direction of the data.** The giver is
+  the machine that has an internet connection (a phone on mobile data, or a laptop on Wi-Fi) and is
+  willing to fetch things on behalf of the other end. The receiver is the machine that wants those bytes.
+- **Either machine can be the giver.** Both the Windows app and the Android app implement both roles, and
+  both can change role without restarting: tick the other radio button before Start, or press
+  **Switch role** while running. So "phone gives, laptop receives" and "laptop gives, phone receives" are
+  both supported — they are the same code with the roles swapped.
+- **What is still missing is the last mile of the tunnel.** Data can now be carried both ways; the path
+  that turns that into "a browser on the receiver loads a web page" is not finished: the receiver's local
+  proxy carries UDP and DNS (and, on Windows, a CONNECT proxy for TCP that the desktop harness does not
+  currently pair — defect 21). Treat "share my internet" as **not yet demonstrated end to end**, and read
+  the app's Internet test output to see exactly which stage got through.
 
 ## What has and has not been proven
 
 **Proven:** the code compiles for x64 Windows (MSVC) and for arm64/x86_64 Android (NDK r26); the engine
 passes all 8 unit-test suites on both Linux and Windows; the framing, CRCs, FEC and encryption agree with
 independently generated reference vectors; a 2 048-byte message crosses the **modelled** device chain in
-each direction at once and is verified by SHA-256 at both ends in about 30 s.
+each direction at once and is verified by SHA-256 at both ends in about 30 s; the Windows app's window and
+every control in its inventory are created on every build (`ui-check.txt` in this zip is that run), on a
+machine with no audio hardware at all.
 
 **Not proven — this is the whole point of a physical test:** nothing in this zip has ever played a sound
 through a loudspeaker or heard one through a microphone. No build host used here has audio hardware, and
@@ -26,9 +50,8 @@ no phone has ever run this app. So:
 - The transfer rate you will get over real air is unknown. The modelled figure, 540 bit/s (**about 67
   bytes per second**), is a ceiling-like reference from a quiet simulated room, not a prediction, and not
   an internet speed.
-- "Internet sharing" is **not** demonstrated. The proxy leg currently does not even pair on the desktop
-  harness, and the Android tunnel carries only UDP and DNS — a browser needs TCP, so do not expect web
-  pages to load. If you try `i` (internet test) and it fails, that is the recorded state, not your fault.
+- "Internet sharing" is **not** demonstrated; see the section above for exactly what is and is not wired.
+  If you press **Internet test** and it fails, that is the recorded state, not your fault.
 - The APK is signed with a throwaway debug key and the EXE is unsigned. Android will warn you about
   "unknown sources"; Windows SmartScreen will warn about an unsigned file. Nothing vouches for these
   binaries except this repository and its build log.
@@ -46,13 +69,15 @@ ni.exe audit
 That runs modem + error correction + retransmission through the modelled room on one machine and prints
 what it measured. `ni audit` tells you how many audio devices Windows offered (0 is a real answer on a
 machine with no sound card). This exercises everything **except** speakers and a microphone — it is not
-evidence about acoustic performance.
+evidence about acoustic performance. You can use the windowed app the same way: `NoiseInternet.exe
+--ui-check` prints the same device count and exits.
 
 ### B. The real thing: Windows PC + Android phone, speaker to microphone
 
 You need: a Windows 10/11 PC with a working loudspeaker and microphone, an Android 6.0+ phone, the two
 binaries, and about 30 minutes. Put them **10–40 cm apart**, on a quiet table, and turn the phone's media
-volume to roughly 70–90 %.
+volume to roughly 70–90 %. Use each device's built-in speaker and microphone; headsets and Bluetooth move
+the signal away from the air.
 
 **1. Install the APK.** With `adb` (Android platform-tools) and USB debugging enabled:
 
@@ -64,75 +89,95 @@ Without adb: copy `noiseinternet-debug.apk` to the phone, tap it, allow installi
 app is named **Noise Internet**. It asks for the microphone permission once — it needs it to listen, and it
 runs a foreground service so the link survives the screen going off.
 
-**2. Find out what audio endpoints your PC has.**
+**2. Start the Windows app.** Double-click `NoiseInternet.exe`. If SmartScreen objects, see the table
+below. The window has, from the top:
 
-```
-NoiseInternet.exe --list-devices
-```
+- **role**, two radio buttons: *this machine GIVES its internet (giver)* / *this machine RECEIVES over
+  sound (receiver)*. Choose one now; you can change it later without restarting.
+- **microphone**, a drop-down of your real capture endpoints (the list comes from WASAPI, and anything the
+  system offers that is a loopback — your own output stream — is labelled as unusable here).
+- **speaker**, a drop-down of your real render endpoints.
+- **profile**, the modulation profile: rate against robustness. `11 FD-HIGH-DBPSK` is the one that
+  performs best in the model; `0 FSK-VOICE` is the most robust and the slowest; `7`/`8 ULTRA` are the
+  near-ultrasonic ones most speakers cannot reproduce.
+- **session id** and **passphrase**: both ends must use the *same* values or they will not pair.
+- **match code**: read-only, empty until a pairing succeeds. When it fills in it shows four words; the
+  other end must show the *identical* four words. If they differ, something is in the middle — do not
+  continue.
+- **full duplex (experimental)**: leave unticked. FDD plus echo cancellation has never been tested on
+  hardware.
+- **local proxy on 127.0.0.1:8471 (receiver side)**: tick it if you want the receiver to serve the local
+  proxy port.
 
-It prints every capture ("mic") and render ("spk") endpoint with its id. Ignore anything marked
-`[LOOPBACK - unusable as a microphone]`; that is the PC's own output stream, not a microphone. Copy the
-two ids you want.
+Then press **Start**. The first lines in the log say which role started, and the status panel behind it
+begins reporting. If the log says `audio open failed`, nothing is being transmitted and the panel will keep
+saying so — fix the endpoints and press Start again.
 
-**3. Decide who is the giver.** The **giver** is the machine with internet that pushes bytes over its
-loudspeaker. The **receiver** is the machine that listens. Both sides must use the *same* session id,
-*same* passphrase and *same* profile, or they will simply not pair.
+**3. Start the phone app** with the same session id, the same passphrase, the same profile number, and
+the opposite role (if the PC is the giver, the phone is the receiver). Choose the built-in microphone and
+built-in speaker, not a headset. Press **Start** there. Leave the VPN-tunnel switch off for a first run
+unless you specifically want to see the tunnel permission dialog.
 
-On the PC, as giver, with the profile that performs best in the model (11 = FD-HIGH-DBPSK):
+**4. Get the link up, then test it.**
 
-```
-NoiseInternet.exe --giver --spk "<render id>" --mic "<capture id>" --profile 11 --session 7 --secret "a-long-passphrase-you-make-up"
-```
+- Wait until both ends say the peer is **ONLINE** and a **match code** appears. Compare the four words on
+  both screens. That is your only defence against a third device joining in, so actually compare them.
+- Press **Calibrate** on one end. It sweeps the bands, prints measured SNR / frame success / BER /
+  payload rate per profile, and suggests a profile and MTU. This is the honest way to pick a profile for
+  your room instead of trusting the model's choice.
+- Press **Link test**: 228 bytes through the air, hash-compared at the far end. It is slow by design — in
+  the model that test took a median of 44 s. **Internet test** asks the giver to fetch
+  `http://example.com/` and prints each stage's result; which stage fails *is* the answer.
+- **Switch role** hands the "who has the internet" duty to the other end while the session is running.
+- **Stop** releases the audio devices and closes the session.
 
-On the phone: role **Receiver (uses the link)**, Microphone = the phone's built-in mic, Speaker = the
-phone's built-in loudspeaker, profile 11, session 7, the same passphrase, then press **Start**.
-
-Leave the full-duplex box unticked (FDD + echo cancellation is experimental and has never been tested on
-hardware). Tick "Route UDP/DNS through a VPN tunnel" only if you specifically want to see the tunnel
-permission dialog and the DNS path — the app will say plainly in its status text what it managed to set up.
-
-**4. Test the link.** On the PC press `l` then Enter — that sends 228 bytes through the air and waits for
-the acknowledgement path. It is slow by design: in the model that test took a median of 44 s. On the phone
-tap **Link test** for the same thing in the other direction. Single-key commands on the PC:
-
-```
-a = calibrate (sweeps the bands, prints per-profile SNR/BER/rate and a suggested profile + MTU)
-l = link test, 228 B
-i = internet test (giver fetches http://example.com/ and prints each stage's result)
-r = switch role at runtime
-p = the profile table the core actually uses
-s = status as JSON
-q = quit (prints a final status screen)
-```
-
-Press Enter on an empty line to reprint the status screen. Every number on it comes from the engine's own
-counters; unmeasured fields print `-`. The line `tunnel : down  no local proxy on this role` is expected on
-the giver.
-
-**5. What to write down.** Distance, volume %, `measured SNR`, `frames sent/recv`, `retries`, `crc-fail`,
-`malformed`, whether the link test reported `completed` or an error string, and the elapsed time.
-`tests/physical/OTA_PROTOCOL.md` in the repository is the full sheet; the app's **Measured reports** panel
-shows the same data on screen. That is what would move gates C, D, F from PARTIAL / NOT TESTED to
+**5. What to write down.** Distance, volume %, measured `snr`, `frames sent` / `received`, `retries`,
+`crc-fail`, `malformed`, whether the link test reported completed or an error, and the elapsed time —
+they are all on the status panel, and the log keeps the engine's own wording. `tests/physical/OTA_PROTOCOL.md`
+in the repository is the full sheet. That is what would move gates C, D, F from PARTIAL / NOT TESTED to
 something better — and if it fails, that report is just as valuable, because nothing here will quietly
 substitute a simulation for your result.
+
+## The same thing from a terminal
+
+`NoiseInternet-console.exe` is the same application with a text interface. Useful when you want to paste a
+result into a bug report, or drive it from a script:
+
+```
+NoiseInternet-console.exe --list-devices
+NoiseInternet-console.exe --giver --spk "<render id>" --mic "<capture id>" --profile 11 --session 7 --secret "a-long-passphrase-you-make-up"
+NoiseInternet-console.exe --receiver --proxy-token hunter2     # then: curl -x http://127.0.0.1:8471 -H "Proxy-Authorization: Noise hunter2" http://example.com/
+```
+
+Single keys at the prompt: `a` calibrate · `l` link test (228 B) · `i` internet test · `r` switch role ·
+`p` profile table · `s` status as JSON · `q` quit (prints a final status screen). Enter on an empty line
+reprints the status screen. Every number on it comes from the engine's own counters; unmeasured fields are
+visible as such. The line `tunnel : down  no local proxy on this role` is expected on the giver.
+
+The console build accepts `--proxy-token <token>`, which is how you give the receiver's proxy a token you
+know. The window itself still has no field for it (defect 27).
 
 ## If it does not work
 
 | you see | what it means |
 |---|---|
+| `audio open failed` / `NOT TESTED: no usable capture/render pair` in the window's log | WASAPI refused the endpoint pair — most often no microphone present or exclusive-mode use by another app. The app reports this instead of pretending to transmit. Check with `NoiseInternet-console.exe --list-devices`. |
 | `device enumeration unavailable` or `NOT TESTED: this build has no audio backend` | the exe was built without `-DNI_WITH_WASAPI=ON`, or the machine truly has no capture endpoint. Rebuild; the flag is on by default in `windows/CMakeLists.txt`. |
-| SmartScreen "Windows protected your PC" | expected: unsigned. "More info → Run anyway", or verify `NoiseInternet.exe` against the sha256 in `BUILD-INFO.txt` / the release page first. |
+| SmartScreen "Windows protected your PC" | expected: unsigned. "More info → Run anyway", or verify the exe against the sha256 in `BUILD-INFO.txt` / the release page first. |
+| The window opens but the mic/speaker drop-downs only say `(system default)` | that machine exposed no capturable endpoints to WASAPI. The app will not invent one; it will fail at Start and say so. |
 | Play Protect / "unknown source" on Android | expected: debug-signed, not from the Play Store. |
-| The two ends never show `peer ONLINE` | different session id, different passphrase, or different profile. Check `s` on the PC and Refresh on the phone. |
-| `pairing did not complete`, no audio at all | the giver's speaker is muted or the phone's media volume is 0; or the phone is applying "voice isolation"/noise suppression — turn audio effects off and use the built-in mic/speaker, not a headset or Bluetooth (that routes the signal away from the air). |
+| The two ends never show the peer as online | different session id, different passphrase, or different profile. Compare all three, not just the passphrase. |
+| Match code stays empty, `pairing did not complete`, no audio at all | the giver's speaker is muted or the phone's media volume is 0; or the phone is applying "voice isolation"/noise suppression — turn audio effects off, and use the built-in mic and speaker, not a headset or Bluetooth (that routes the signal away from the air). |
 | CRC failures and lots of retries | too loud or too far: the model has a ~26 dB receiver distortion floor (defect 20), and real AGC in phones makes that worse. Lower the volume a little and try again. |
-| `i` (internet test) fails at an early stage | the known state: `ni demo`'s proxy path does not pair (defect 21) and the Android tunnel carries no TCP. Which stage failed is the result — that's what the printout is for. |
-| A browser pointed at `127.0.0.1:8471` says it needs a password | correct: the local proxy uses `Proxy-Authorization: Noise <token>`, which browsers cannot send. Use curl, and give the receiver a token you know: `NoiseInternet.exe --receiver ... --proxy-token hunter2` then `curl -x http://127.0.0.1:8471 -H "Proxy-Authorization: Noise hunter2" http://example.com/`. The app has no equivalent field yet (defect 27), so its proxy can only be driven from inside the app. |
+| Internet test fails at an early stage | the known state: the desktop proxy path does not pair (defect 21) and the Android tunnel carries no TCP. Which stage failed is the result — that is what the printout is for. |
+| A browser pointed at `127.0.0.1:8471` says it needs a password | correct: the local proxy uses `Proxy-Authorization: Noise <token>`, which browsers cannot send. Use the console build with `--proxy-token` and curl, as shown above. The window has no field for the token yet (defect 27). |
+| The window closes while a test is running | it will not: pressing Close during a link test waits for the result, because killing the engine mid-measurement would produce a number that means nothing. The tests are bounded (the link test gives up after ~12 s of silence). |
 
 ## Building it yourself instead of trusting the zip
 
 Windows: `cmake -S windows -B build` then `cmake --build build --config Release` (needs Visual Studio
-2022 "Desktop development with C++" + CMake; see `windows/BUILD.md`). Android: `android/build_apk.sh`
-(needs JDK 17, Android SDK platform 34, build-tools and NDK 26.1.10909125; see `android/BUILD.md`). The CI
+2022 "Desktop development with C++" + CMake; see `windows/BUILD.md`). That produces both
+`NoiseInternet.exe` (the window) and `NoiseInternet-console.exe`. Android: `android/build_apk.sh` (needs
+JDK 17, Android SDK platform 34, build-tools and NDK 26.1.10909125; see `android/BUILD.md`). The CI
 definitions in `.github/workflows/build.yml` are exactly what produced these files, including the size and
-hash manifest.
+hash manifest and the `ui-check.txt` transcript.
