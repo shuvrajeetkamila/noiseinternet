@@ -68,6 +68,25 @@ std::wstring fmt(const wchar_t* f, ...) {
   return std::wstring(buf.data(), (size_t)n);
 }
 
+// EnumChildWindows wants a WNDENUMPROC: a capture-less lambda happens to convert on x64, but the
+// calling convention a lambda ends up with is not something this code should be betting on, so the
+// control-dump visitor is an ordinary function.
+struct ChildDump {
+  std::wstring* out;
+};
+BOOL CALLBACK child_dump(HWND h, LPARAM l) {
+  ChildDump* c = reinterpret_cast<ChildDump*>(l);
+  wchar_t cls[128] = L"", txt[256] = L"";
+  GetClassNameW(h, cls, 127);
+  SendMessageW(h, WM_GETTEXT, 255, (LPARAM)txt);
+  RECT r;
+  GetWindowRect(h, &r);
+  c->out->append(fmt(L"  %-12s enabled=%c visible=%c %4dx%-4d  \"%ls\"\r\n", cls,
+                     IsWindowEnabled(h) ? L'y' : L'n', IsWindowVisible(h) ? L'y' : L'n', r.right - r.left,
+                     r.bottom - r.top, txt));
+  return TRUE;
+}
+
 // ---------------------------------------------------------------- the application
 struct App {
   HWND win = nullptr;
@@ -197,9 +216,9 @@ struct App {
             out = w8(rep.summary);
             for (size_t i = 0; i < rep.bands.size(); ++i) {
               const Calibrator::BandResult& b = rep.bands[i];
-              out += fmt(L"\n%hs: snr %.2f dB, frames %.1f %%, rawBER %.2e, fecBER %.2e, %hs bps, usable=%hs%hs",
+              out += fmt(L"\n%hs: snr %.2f dB, frames %.1f %%, rawBER %.2e, fecBER %.2e, payload %.0f bps, usable=%hs%hs",
                          b.name.c_str(), b.snr_db, b.frame_success * 100.0, b.raw_ber, b.fec_ber,
-                         "measured", b.usable ? "yes" : "no", b.clipped ? "  [CLIPPED]" : "");
+                         b.payload_bps, b.usable ? "yes" : "no", b.clipped ? "  [CLIPPED]" : "");
             }
             out += fmt(L"\nbest profile id %d, suggested mtu %d", rep.best_profile, rep.suggested_mtu);
             if (!rep.hardware_ok)
@@ -347,22 +366,8 @@ struct App {
     int nkids = EnumChildWindows(win, nullptr, 0);
     o += fmt(L"ui-check: window=%hs class=%ls child_windows=%d\r\n",
              running.load() ? "running" : "created", L"NoiseInternetGui", nkids);
-    struct Ctx { std::wstring* out; } ctx{&o};
-    EnumChildWindows(
-        win,
-        [](HWND h, LPARAM l) -> BOOL {
-          Ctx* c = reinterpret_cast<Ctx*>(l);
-          wchar_t cls[128] = L"", txt[256] = L"";
-          GetClassNameW(h, cls, 127);
-          SendMessageW(h, WM_GETTEXT, 255, (LPARAM)txt);
-          RECT r; GetWindowRect(h, &r);
-          wchar_t en = IsWindowEnabled(h) ? L'y' : L'n';
-          wchar_t vis = IsWindowVisible(h) ? L'y' : L'n';
-          c->out->append(fmt(L"  %-12s enabled=%c visible=%c %4dx%-4d  \"%ls\"\r\n", cls, en, vis,
-                             r.right - r.left, r.bottom - r.top, txt));
-          return TRUE;
-        },
-        (LPARAM)&ctx);
+    ChildDump ctx{&o};
+    EnumChildWindows(win, child_dump, (LPARAM)&ctx);
     o += fmt(L"ui-check: audio endpoints seen by the engine: %d (a build agent has none; that is a real "
              L"answer, not a defect in the UI)\r\n", (int)devs.size());
     int caps = 0, micc = 0;
@@ -403,7 +408,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       a->big = CreateFontW(20, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                            CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
       a->mono = CreateFontW(0, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, FIXED_PITCH | FF_MODERN, L"Consolas");
+                            CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
       mk(hwnd, L"BUTTON", L"this machine GIVES its internet (giver)", BS_AUTORADIOBUTTON | WS_GROUP, 16, 24,
          280, 20, a->font, IDC_GIVER);
       a->giver_radio = GetDlgItem(hwnd, IDC_GIVER);
