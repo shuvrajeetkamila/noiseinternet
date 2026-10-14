@@ -1187,7 +1187,10 @@ int cmd_demo(const Opts& o) {
   const int pcode = code_of(t1);
   // 405/407/503 with our own wording in the body means the local proxy answered this request itself:
   // no request reached an origin, so nothing about the acoustic path can be concluded from it.
-  bool answered_by_proxy = proxied.empty() || pcode == 405 || pcode == 407 || pcode == 503;
+  // 405/407/503 are this proxy's own replies; 504 is this proxy's own timeout page. Any of them means
+  // no origin response crossed the link, so nothing about the link can be concluded - which is what the
+  // first field run's "DIFFERENT" verdict was actually reporting.
+  bool answered_by_proxy = proxied.empty() || pcode == 405 || pcode == 407 || pcode == 503 || pcode == 504;
   printf("\n  through-proxy bytes : %zu   sha256 %s\n", proxied.size(),
          sha_hex(proxied.data(), proxied.size()).c_str());
   printf("  direct #1     bytes : %zu   sha256 %s\n", direct.size(),
@@ -1214,7 +1217,16 @@ int cmd_demo(const Opts& o) {
   }
   // One verdict, chosen in order of what the run can actually support. Every earlier version of this
   // block either printed two lines at once or blamed the link for a fact about the URL or the harness.
-  if (answered_by_proxy) {
+  if (proxied.empty() && pcode < 0) {
+    // The client got no status line at all. Saying "the proxy answered it" (HTTP -1) for this was
+    // worse than saying nothing: the proxy never wrote a byte. The receiver's report above says how far
+    // the response got.
+    printf("  comparison          : NO RESPONSE - the client received no HTTP status line at all, so\n"
+           "                        no byte of the response was comparable. Whether that is the link or\n"
+           "                        the harness is in the two reports above: `requests_fail` counts the\n"
+           "                        proxy's own timeout replies and `bytes_relayed` counts what reached\n"
+           "                        the client's socket.\n");
+  } else if (answered_by_proxy) {
     printf("  comparison          : INVALID RUN - the local proxy answered this request itself "
            "(HTTP %d),\n", pcode);
     printf("                        so no origin response crossed the acoustic link. %s\n",
@@ -1238,6 +1250,12 @@ int cmd_demo(const Opts& o) {
            "                        --url 'https://api.github.com/octocat?s=noiseinternet' (821 B).\n",
            direct.size(), direct2.size(), proxied.size(),
            structure_same ? " with a matching status/content-type/size line" : " (STRUCTURE DIFFERS)");
+  else if (!direct.empty() && proxied.size() < direct.size() && first_diff == proxied.size())
+    printf("  comparison          : PARTIAL - %zu of the %zu bytes of the response crossed the\n"
+           "                        acoustic link and then the transfer stopped; every byte that did\n"
+           "                        arrive matched the direct copy. The link, not the origin: use the\n"
+           "                        two reports above to see where the last fragment went.\n",
+           proxied.size(), direct.size());
   else
     printf("  comparison          : DIFFERENT - the origin is stable, so this is the link's doing:\n"
            "                        %zu B via the link vs %zu B direct, first differing byte %zu%s\n",

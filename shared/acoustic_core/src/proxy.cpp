@@ -306,6 +306,16 @@ int ReceiverGateway::handle_readable(ClientState& c, int64_t now_ms) {
         c.sent_bytes += blob.size();
         c.phase = c.connect_mode ? 3 : 2;
         c.deadline_ms = now_ms + NI_PROXY_TIMEOUT_MS;
+        // The accept path registers the socket under a placeholder id so the pump can see it before a
+        // request head has arrived. Once the real stream id exists the placeholder has to go: leaving it
+        // meant the pump walked the same socket under two ids, and the orphan copy - still in phase 0 -
+        // hit its own deadline later and wrote a 504 onto a connection whose response was still in
+        // flight.
+        for (auto& kv : clients_)
+          if (kv.first != c.stream && kv.second.fd == c.fd) {
+            clients_.erase(kv.first);
+            break;
+          }
         clients_[c.stream] = c;
         return NI_OK;
       }
@@ -328,6 +338,13 @@ int ReceiverGateway::handle_readable(ClientState& c, int64_t now_ms) {
 
 int ReceiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, size_t n,
                                uint16_t flags) {
+  // The giver answers on `request_stream + 16384` (that is the id its gateway pushes with, and the id
+  // node.cpp routes to this proxy), so the id has to be translated back before the client is looked up.
+  // Without this the lookup could never match anything: the response arrived, found no client, and was
+  // dropped with NI_ERR_PARAM, while the client waited until this proxy's own 20 s deadline wrote a 504
+  // on the same connection. Every "the response leg does not complete" observation in this repository is
+  // that, and it was not the link's doing. Defect 41.
+  stream = (uint16_t)(stream - 16384);
   auto it = clients_.find(stream);
   if (it == clients_.end()) return NI_ERR_PARAM;  // response for a stream we already dropped
   ClientState& c = it->second;
