@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "ni/abi.h"
+#include "ni/audio_io.h"   // ni_wav_write_f32: the record button keeps what the microphone gave
 #include "ni/audio_wasapi.h"
 #include "ni/common.h"
 #include "ni/node.h"
