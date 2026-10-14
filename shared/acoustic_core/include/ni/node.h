@@ -100,6 +100,16 @@ struct StatusSnapshot {
   // inventing its own wording. Empty only when there is nothing useful to say (paired and healthy).
   std::string advice;
   std::string audio_note;      // "NOT TESTED: no audio hardware in this environment" etc.
+  // Filled by Node::self_hear_*: counts taken over a measured interval, never a prediction.
+  std::string to_json() const;
+};
+
+// A self-hearing measurement: see Node::self_hear_now().
+struct SelfHear {
+  uint64_t bursts_heard = 0;    // bursts whose sync was found in the window
+  uint64_t frames_decoded = 0;  // frames of ours that came back through the microphone
+  double in_dbfs = -120.0;      // the newest capture block's level
+  std::string verdict;          // one sentence, empty until self_hear_since() fills it
   std::string to_json() const;
 };
 
@@ -137,6 +147,13 @@ class Node {
   // ---- user actions (all measured, none of them a stub) ----
   int calibrate(int64_t now_ms, Calibrator::Report* out);   // runs a full calibration exchange
   int test_link(int64_t now_ms, int payload_bytes, std::string* report);  // hash-compared ping
+  // Does this machine hear its own speaker? The one question a user with a pair that will not work
+  // cannot answer alone, and the one that needs no second device: a running node is always transmitting
+  // (keepalive bursts, or the assist beacon), so whatever its own microphone decodes during those
+  // seconds came out of its own speaker. Take a reading, wait, take another with the first as the
+  // baseline; the second call fills in the deltas and the sentence.
+  SelfHear self_hear_now() const;
+  SelfHear self_hear_since(const SelfHear& before, int seconds) const;
   int test_internet(int64_t now_ms, const std::string& url, InternetVerify* out);
   // How many frames the audio device still has queued and unplayed. The apps sample this from
   // their own audio backend (WASAPI GetCurrentPadding, AudioTrack head vs written) and hand it to

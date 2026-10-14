@@ -159,7 +159,10 @@ class NoiseService : VpnService(), AudioEngine.Sink {
         if (cfg.pairingSecret.length < 8) {
             publish("{\"state_name\":\"NO PASSPHRASE\",\"pairing_note\":\"the passphrase is ${cfg.pairingSecret.length} " +
                 "characters. Both ends must be given the SAME passphrase of 8+ characters, or pairing is " +
-                "never attempted at all.\",\"audio_note\":\"nothing was started and nothing was transmitted\"}")
+                "never attempted at all.\",\"audio_note\":\"nothing was started and nothing was transmitted\"," +
+                    "\"advice\":\"type the SAME passphrase of at least 8 characters on this phone and on the " +
+                    "other device; without one the engine never sends a pairing challenge, so the two ends " +
+                    "can never pair\"}")
             stopSelf()
             return START_NOT_STICKY
         }

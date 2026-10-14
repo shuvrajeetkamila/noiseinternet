@@ -112,10 +112,20 @@ void run_command(App& app, const std::string& cmd) {
              b.frame_success * 100.0, b.raw_ber, b.fec_ber, b.payload_bps,
              b.usable ? "yes" : "no", b.clipped ? "  [CLIPPED]" : "");
     }
-    printf("best profile id %d, suggested mtu %d\n", rep.best_profile, rep.suggested_mtu);
-    if (!rep.hardware_ok)
-      printf("hardware_ok = false: these bands came from the modelled channel, not from this "
-             "machine's sound card.\n");
+    printf("best profile id %d, suggested mtu %d (model suggestion, not a room measurement)\n",
+           rep.best_profile, rep.suggested_mtu);
+  } else if (cmd == "h") {
+    // "hear myself": eight seconds of this machine listening to its own speaker. Detached, because the
+    // pump has to keep running for the audio to move at all - and the answer is one sentence.
+    SelfHear before = node.self_hear_now();
+    std::thread([&node, before] {
+      for (int i = 0; i < 80 && !g_quit.load(); ++i) Sleep(100);
+      if (g_quit.load()) return;
+      SelfHear now = node.self_hear_since(before, 8);
+      printf("\nhear-myself: %s\n", now.verdict.c_str());
+      fflush(stdout);
+    }).detach();
+    printf("listening to this machine's own speaker for 8 seconds...\n");
   } else if (cmd == "l") {
     std::string rep;
     int rc = node.test_link(now, 228, &rep);
@@ -370,8 +380,8 @@ int main(int argc, char** argv) {
     });
   }
 
-  printf("commands: a=calibrate  l=link test  i=internet test  r=switch role  "
-         "p=profiles  s=status json  q=quit\n");
+  printf("commands: a=calibrate(model sweep)  h=hear myself  l=link test  i=internet test  "
+         "r=switch role  p=profiles  s=status json  q=quit\n");
   print_status(app);
   std::string line;
   while (!g_quit.load() && std::getline(std::cin, line)) {

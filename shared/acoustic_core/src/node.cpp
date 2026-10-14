@@ -467,9 +467,15 @@ int Node::calibrate(int64_t now, Calibrator::Report* out) {
     link_->arq().send_frame(NI_FT_CAL_START, nullptr, 0, true);
   }
   Calibrator::evaluate(out->bands, out);
+  // What these numbers actually are: the modem run against its own simulated channel at three signal
+  // levels, once per profile. Nothing here touches a microphone or a speaker, and the line used to say
+  // "measured on device audio" merely because this machine has sound devices - which is exactly the kind
+  // of claim this project forbids, and a field report took it for a room measurement. (Defect 53.)
   std::ostringstream s;
-  s << (hw_present_ ? "measured on device audio" : "NOT TESTED on hardware: no audio device here")
-    << "; profile numbers come from the " << (cfg_.sim_channel ? "simulated acoustic channel" : "loopback waveform path");
+  s << "MODEL SWEEP, NOT A ROOM MEASUREMENT: the modem against its own simulated channel at 18, 12 and " \
+       "7 dB SNR, once per profile. No microphone or speaker was involved, and the profile suggestion " \
+       "below comes from the model - a real pair chooses its profile from what it actually decodes"
+    << (hw_present_ ? "." : ". NOT TESTED on hardware: no audio device on this build host.");
   out->summary += "; " + s.str();
   return NI_OK;
 }
@@ -488,6 +494,14 @@ static std::string status_advice(const StatusSnapshot& s) {
   std::ostringstream o;
   if (!s.running) {
     return "the engine is not running: press Start. Nothing is transmitted until you do.";
+  }
+  if (s.pairing == "failed" || s.pairing == "locked") {
+    // This is not a guess: the engine reached the cryptographic part of the handshake and the proof did
+    // not match, which has exactly one cause - the two passphrases differ. It also used to be reported
+    // with no words at all, which is why a mismatch looked identical to "nothing happened".
+    return "the two passphrases do not match. The link got as far as checking the proof and it failed, " \
+           "so the words typed on the two devices are not the same string (capital letters, spaces and " \
+           "punctuation all count). Type the same passphrase on both ends and press Start again.";
   }
   if (s.pairing == "paired") {
     return "paired: both ends show the same match code and data can flow both ways. The rate on this " \
@@ -519,8 +533,19 @@ static std::string status_advice(const StatusSnapshot& s) {
          "is in the path.";
     return o.str();
   }
+  if (!s.peer_online && s.frames_received > 0) {
+    // No peer has ever answered, yet frames are decoding - and every node hears its own speaker in a
+    // room (half duplex deliberately does not cancel it). So the only thing these frames can be is our
+    // own transmission coming back through the microphone.
+    o << "this machine is decoding its own transmissions (" << s.frames_received
+      << " frames) while no other device has answered: the speaker, the microphone and the modem all " \
+         "work on THIS end. What is not working is the other device reaching this one - check that it " \
+         "is started, that it is transmitting (a receiver is silent until it hears something), and " \
+         "that both ends show the same profile and session id.";
+    return o.str();
+  }
   if (s.frames_received == 0) {
-    o << "bursts are arriving and their sync is found, but nothing decodes (" << s.sync_hits
+    o << "bursts are arriving and their sync is found, but nothing decodes ("  << s.sync_hits
       << " so far): the two ends most likely disagree on the profile number, the session id or the " \
          "passphrase. Both numbers are shown on this panel - make them identical on both devices.";
     return o.str();
@@ -530,6 +555,64 @@ static std::string status_advice(const StatusSnapshot& s) {
        "SAME passphrase, at least 8 characters. The match code appears on this panel as soon as " \
        "pairing succeeds.";
   return o.str();
+}
+
+std::string SelfHear::to_json() const {
+  std::ostringstream o;
+  o << "{\"bursts_heard\": " << bursts_heard << ", \"frames_decoded\": " << frames_decoded
+    << ", \"in_dbfs\": " << in_dbfs << ", \"verdict\": \"" << verdict << "\"}";
+  return o.str();
+}
+
+SelfHear Node::self_hear_now() const {
+  SelfHear h;
+  StatusSnapshot s = snapshot();
+  h.bursts_heard = s.sync_hits;
+  h.frames_decoded = s.frames_received;
+  h.in_dbfs = s.in_dbfs;
+  return h;
+}
+
+SelfHear Node::self_hear_since(const SelfHear& before, int seconds) const {
+  SelfHear h = self_hear_now();
+  const uint64_t bursts = h.bursts_heard >= before.bursts_heard ? h.bursts_heard - before.bursts_heard : 0;
+  const uint64_t frames = h.frames_decoded >= before.frames_decoded ? h.frames_decoded - before.frames_decoded : 0;
+  h.bursts_heard = bursts;
+  h.frames_decoded = frames;
+  std::ostringstream o;
+  if (!link_ || !running_) {
+    h.verdict = "the engine is not running, so nothing was listened to.";
+    return h;
+  }
+  if (h.in_dbfs <= -119.5) {
+    h.verdict = "YOUR MICROPHONE IS NOT DELIVERING ANY SOUND AT ALL: the level never moved off -120 " \
+                "dBFS in " + std::to_string(seconds) + " seconds, so no amount of speaker volume can " \
+                "help until that is fixed. Check the microphone permission, close any other app that " \
+                "may hold the microphone, and read the audio line below - it names the format and the " \
+                "input source that is running.";
+    return h;
+  }
+  if (bursts == 0) {
+    o << "NOTHING WAS HEARD: this machine transmitted for " << seconds << " seconds and its own " \
+         "microphone did not catch a single burst (newest level " << (int)(h.in_dbfs + 0.5) << " dBFS). " \
+         "Either the microphone is not the one you think it is, or the speaker is muted or pointing " \
+         "away, or the two devices are too far apart - the sound has to be loud enough to come back.";
+    h.verdict = o.str();
+    return h;
+  }
+  if (frames == 0) {
+    o << "HEARD BUT NOT READABLE: the microphone caught " << bursts << " burst(s) in " << seconds
+      << " seconds and not one of them decoded. The audio is being altered between the speaker and the " \
+         "microphone - Windows sound effects (noise suppression, echo cancellation, 'audio " \
+         "enhancements') or a device that resamples - or the level is wrong at either end.";
+    h.verdict = o.str();
+    return h;
+  }
+  o << "THIS END WORKS: the microphone decoded " << frames << " of this machine's own bursts in "
+    << seconds << " seconds while no other device answered. Speaker, microphone and modem are all " \
+       "fine here, so whatever still fails is the other device reaching this one.";
+  h.verdict = o.str();
+  return h;
 }
 
 StatusSnapshot Node::snapshot() const {

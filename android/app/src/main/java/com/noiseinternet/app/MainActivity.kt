@@ -277,8 +277,13 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("state ").append(st.state).append("  role ").append(st.role)
             append("  profile ").append(st.profile)
             st.sampleRate?.let { append("  fs ").append(it.toInt()) }
-            if (st.advice.isNotBlank()) {
-                append("\n\nWHAT TO DO: ").append(st.advice).append("\n")
+            // The engine's own sentence when it has one (it knows things the panel cannot see: own
+            // transmissions heard back, a passphrase proof that failed). The Kotlin diagnosis is the
+            // fallback for the documents the service writes itself - NO PASSPHRASE and friends - which
+            // never went through the engine and therefore have no advice line.
+            val explain = st.advice.ifBlank { st.diagnosis() }
+            if (explain.isNotBlank()) {
+                append("\n\nWHAT TO DO: ").append(explain).append("\n")
             }
             append("\npeer ").append(if (st.peerOnline) "online" else "offline")
             append("  pairing ").append(st.pairing)
@@ -288,7 +293,6 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("  bursts seen ").append(st.n(st.syncHits))
             append("  decoded ").append(st.n(st.framesReceived))
             st.txGain?.let { append("\nout level ").append(String.format("%.2f", it)).append(" of full scale") }
-            append("\nwhy: ").append(st.diagnosis())
             append("  mtu ").append(st.n(st.mtu))
             append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")
             append("  RSSI ").append(st.f(st.rssiDbfs)).append(" dBFS")

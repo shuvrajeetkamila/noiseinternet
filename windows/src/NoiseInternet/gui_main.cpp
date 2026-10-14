@@ -309,6 +309,7 @@ struct App {
                          b.payload_bps, b.usable ? "yes" : "no", b.clipped ? "  [CLIPPED]" : "");
             }
             out += fmt(L"\nbest profile id %d, suggested mtu %d", rep.best_profile, rep.suggested_mtu);
+            out += L"\n(model suggestion - this machine's real choice comes from what it decodes on air)";
             if (!rep.hardware_ok)
               out += L"\nNOTE: hardware_ok=false - these bands came from the modelled channel, not from this machine's sound card.";
           }
@@ -421,7 +422,35 @@ struct App {
             cfg.enable_receiver_proxy ? L"on 127.0.0.1:8471" : L"off"));
     running.store(true);
     pump = std::thread([this] { pump_loop(); });
+    // The one question a user with a pair that will not work cannot answer alone, and the one that needs
+    // no second device: does this machine hear its own speaker? Answered automatically, in words, eight
+    // seconds after Start, because the answer is a sentence and not a number - and because a person who
+    // has just pressed Start is not going to read bursts-seen and dBFS and work it out (defect 54).
+    std::thread([this] { self_hear_after_start(); }).detach();
     return true;
+  }
+
+  // Eight seconds of the link's own counters. What it can see: the machine transmits continuously
+  // (keepalives as giver, the assist beacon as receiver), so anything the microphone decodes in those
+  // seconds came out of this machine's own speaker.
+  void self_hear_after_start() {
+    SelfHear before;
+    {
+      std::lock_guard<std::mutex> g(mu);
+      if (!node) return;
+      before = node->self_hear_now();
+    }
+    // Sliced, and every slice checks quitting: a detached eight-second thread that wakes up after the
+    // window is gone would read a destroyed App.
+    for (int i = 0; i < 80 && !quitting.load(); ++i) Sleep(100);
+    if (quitting.load()) return;
+    SelfHear now;
+    {
+      std::lock_guard<std::mutex> g(mu);
+      if (!node || !running.load() || quitting.load()) return;
+      now = node->self_hear_since(before, 8);
+    }
+    say(L"hear-myself: " + w8(now.verdict));
   }
 
   void refresh() {

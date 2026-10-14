@@ -232,7 +232,18 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    and only then the room itself. Install the CI APK on a phone and run the CI
    EXE on a Windows box with a speaker and a microphone: that is still the only thing standing between the
    current artifacts and gates E/F, and the report from the first attempt ("it never paired, from both the
-   exe and the apk") produced four fixes that all sit in the path a first run takes - defects 32-35. The
+   exe and the apk") produced four fixes that all sit in the path a first run takes - defects 32-35.
+   things to check first on a re-run, in order: (a) does the passphrase field have the *same* 8+ characters
+   on both ends (the apps now refuse to start otherwise, with the reason on screen); (b) the same profile
+   number and session id on both - both apps now start on profile 10 / session id 7; (c) the one-line
+   **why** on each status panel, which now distinguishes "the microphone hears nothing", "bursts arrive but
+   do not decode" and "no passphrase" from each other. The old advice about device ids in
+   `packaging/windows/README-RUN.md` still applies. `packaging/windows/README-RUN.md` is the procedure, and the first thing to try in the window
+   is **Start** on both ends followed by comparing the four-word **match code**, which now appears on both
+   screens (the snapshot carries the SAS; before this only the diagnostics JSON did, so no front end could
+   display it). The cheap code task here is defect 27 - a proxy-token field in the Android config, without
+   which nothing outside the app can authenticate to its proxy (the Windows console build already has
+   `--proxy-token`, and the window still lacks it).
    second report (the phone's level sat at -120 dBFS and never moved) produced three more, and reading the
    Windows audio code afterwards a fourth. **Defect 45**: the profile drop-down was empty because the
    Android parser handed a JSON array to `JSONObject()`; it accepts both shapes now, and the Start button
@@ -257,17 +268,19 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    microphone), float capture with automatic fallback to 16-bit PCM, a failed read retried instead of
    ending the session, and the panel's `audio:` line now names the source, the format, the failed-read
    count and whether capture is open at all. None of this has been near a phone or a sound card.
-   things to check first on a re-run, in order: (a) does the passphrase field have the *same* 8+ characters
-   on both ends (the apps now refuse to start otherwise, with the reason on screen); (b) the same profile
-   number and session id on both - both apps now start on profile 10 / session id 7; (c) the one-line
-   **why** on each status panel, which now distinguishes "the microphone hears nothing", "bursts arrive but
-   do not decode" and "no passphrase" from each other. The old advice about device ids in
-   `packaging/windows/README-RUN.md` still applies. `packaging/windows/README-RUN.md` is the procedure, and the first thing to try in the window
-   is **Start** on both ends followed by comparing the four-word **match code**, which now appears on both
-   screens (the snapshot carries the SAS; before this only the diagnostics JSON did, so no front end could
-   display it). The cheap code task here is defect 27 - a proxy-token field in the Android config, without
-   which nothing outside the app can authenticate to its proxy (the Windows console build already has
-   `--proxy-token`, and the window still lacks it).
+   **Defects 53-56**, from the two real-hardware reports (`reports/RESULTS.md` §4.75 - the only real
+   transducer data in this repository). The Android panel's own audio line named the cause in one line:
+   `capture 32-bit float from UNPROCESSED, failed reads 2895, capture reopened 241 times`. Every reopen
+   came back to the identical source and format because the fallback only advanced when a recorder failed
+   to *open* - and this phone opens 32-bit float and then returns -2 for every read, so 16-bit and MIC
+   were never reached. A cursor now walks every (input source x encoding) combination on **any** failure.
+   Both front ends also answer the question nobody could answer from a panel - *can this machine hear its
+   own speaker?* - because a running node transmits continuously and whatever its microphone decodes is
+   its own burst: the window prints that verdict eight seconds after Start, the console has
+   `h=hear myself`, and the phone's advice line says it in words. `ni calibrate` no longer claims those
+   numbers came from the room (they never did - defect 53), and a passphrase mismatch is stated as a fact
+   instead of leaving `failed` unexplained. What is still missing is the same thing as before: a burst
+   crossing real air.
 1. **Gate C, remaining half.** Pairing under loss (defect 26) is the cheapest hard thing left: the counters already say the giver's bursts never arrive, so start from the sim's loss injection, not from the handshake.
    Next, the 82-byte-profile 2 kB run and multipath, which now each succeed 1 trial in 3 - a retry budget that gives up (defect 22) is plausibly all that separates them. A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver

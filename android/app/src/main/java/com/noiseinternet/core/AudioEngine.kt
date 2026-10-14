@@ -86,6 +86,12 @@ class AudioEngine(
     // phone whose microphone cannot be opened says so immediately instead of running a deaf engine.
     @Volatile private var capOpen = false
     @Volatile private var capDead = false
+    // Which (source, encoding) combination is being tried. Moved on every failure, by any kind of
+    // failure, because "it opened fine and then never produced a sample" is a real device behaviour
+    // (see captureLoop).
+    @Volatile private var capCursor = 0
+    @Volatile private var capCycles = 0
+    @Volatile private var capCombo = "not open"
     // The microphone the user picked, remembered for every (re)open - the recorder is created by the
     // capture thread now, so start() can no longer attach the preference to an object it owns.
     @Volatile private var prefInput: AudioDeviceInfo? = null
@@ -185,6 +191,9 @@ class AudioEngine(
         capEncoding = AudioFormat.ENCODING_PCM_FLOAT
         capOpen = false
         capDead = false
+        capCursor = 0
+        capCycles = 0
+        capCombo = "not open"
         inThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             captureLoop()
@@ -246,60 +255,44 @@ class AudioEngine(
     private fun captureLoop() {
         val kReadsBeforeRebuild = 12
         var fails = 0
-        var sources = sourceCandidates()
-        var si = 0
+        val combos = combinations()
         val inBuf = FloatArray(capFrames)
         val shortBuf = ShortArray(capFrames)
         while (running.get()) {
             val r = rec
             if (r == null) {
-                // (re)open: try the current source with the current encoding, then 16-bit, then move on
-                val encodings = if (capEncoding == AudioFormat.ENCODING_PCM_FLOAT)
-                    intArrayOf(AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_16BIT)
-                else intArrayOf(AudioFormat.ENCODING_PCM_16BIT)
-                var opened = false
-                for (enc in encodings) {
-                    val src = sources[si % sources.size]
-                    val nr = openInput(src.first, enc, capFrames)
-                    if (nr != null) {
-                        rec = nr
-                        capEncoding = enc
-                        inputSourceName.set(src.first)
-                        lastError = if (enc == AudioFormat.ENCODING_PCM_16BIT)
-                            "capture opened as 16-bit PCM (this device refused 32-bit float reads)"
-                        else lastError
-                        if (Build.VERSION.SDK_INT >= 23) prefInput?.let { pd ->
-                            if (!nr.setPreferredDevice(pd))
-                                lastError = "the chosen microphone was refused by the platform; " +
-                                    "using the device default instead"
-                        }
-                        try { nr.startRecording() } catch (e: Exception) {
-                            lastError = "startRecording failed: ${e.message}"
-                            try { nr.release() } catch (e2: Exception) { }
-                            rec = null
-                            continue
-                        }
-                        capRebuilds++
-                        capOpen = true
-                        capRate = if (Build.VERSION.SDK_INT >= 23) nr.sampleRate else sampleRate
-                        fails = 0
-                        opened = true
-                        break
-                    }
-                    lastError = "AudioRecord(${src.second}, ${encodingName(enc)}) could not be created"
-                }
-                if (!opened) {
-                    si++
-                    if (si >= sources.size) {
-                        // Every source, in both encodings, has been refused. This is not a transient
-                        // failure: say so once, keep retrying in the background, and keep playback
-                        // running - the far end may still be able to reach us.
-                        capDead = true
-                        Thread.sleep(500)
-                        si = 0
-                    }
+                val combo = combos[capCursor % combos.size]
+                val nr = openInput(combo.first, combo.second, capFrames)
+                if (nr == null) {
+                    advanceCursor(combos.size)
                     continue
                 }
+                rec = nr
+                capEncoding = combo.second
+                inputSourceName.set(combo.first)
+                capCombo = sourceName(combo.first) + "/" + encodingName(combo.second)
+                if (combo.second == AudioFormat.ENCODING_PCM_16BIT)
+                    lastError = "capture opened as 16-bit PCM from $capCombo (32-bit float was refused " +
+                        "or did not deliver samples on this device)"
+                if (Build.VERSION.SDK_INT >= 23) prefInput?.let { pd ->
+                    if (!nr.setPreferredDevice(pd))
+                        lastError = "the chosen microphone was refused by the platform; using the " +
+                            "device default instead"
+                }
+                try {
+                    nr.startRecording()
+                } catch (e: Exception) {
+                    lastError = "startRecording failed: ${e.message}"
+                    try { nr.release() } catch (e2: Exception) { }
+                    rec = null
+                    advanceCursor(combos.size)
+                    continue
+                }
+                capRebuilds++
+                capOpen = true
+                capRate = if (Build.VERSION.SDK_INT >= 23) nr.sampleRate else sampleRate
+                fails = 0
+                if (lastError.isEmpty()) lastError = "capture running as $capCombo"
                 continue
             }
             // The two encodings have separate read() overloads - float needs the FloatArray one and
@@ -319,13 +312,19 @@ class AudioEngine(
                 fails++
                 capReadFailures++
                 if (fails >= kReadsBeforeRebuild) {
-                    // Give up on this recorder: close it, and let the top of the loop reopen (16-bit
-                    // first if we were on float) or move to the next source.
-                    lastError = "capture read failed $fails times in a row (last code $n): reopening"
+                    // THIS is the fix for the second field report. The phone opened 32-bit float from
+                    // UNPROCESSED successfully and then returned -2 (ERROR_BAD_VALUE) for every read:
+                    // 2895 failed reads, 241 reopens, and every reopen came back to the identical
+                    // source and encoding, because the old code only moved on when a recorder failed to
+                    // *open*. Now any failure moves the cursor, so the 16-bit and MIC fallbacks that
+                    // exist for exactly this device are actually reachable.
+                    lastError = "capture $capCombo: read failed $fails times in a row (code $n); trying " +
+                        "the next input source and format"
                     try { r.stop() } catch (e: Exception) { }
                     try { r.release() } catch (e: Exception) { }
                     rec = null
                     fails = 0
+                    advanceCursor(combos.size)
                 } else {
                     Thread.sleep(10)
                 }
@@ -334,6 +333,30 @@ class AudioEngine(
         try { rec?.stop() } catch (e: Exception) { }
         try { rec?.release() } catch (e: Exception) { }
         rec = null
+    }
+
+    /** Every (input source, encoding) pair this platform will let us try, best first. */
+    private fun combinations(): List<Pair<Int, Int>> {
+        val out = ArrayList<Pair<Int, Int>>()
+        for ((src, _) in sourceCandidates()) {
+            out.add(Pair(src, AudioFormat.ENCODING_PCM_FLOAT))
+            out.add(Pair(src, AudioFormat.ENCODING_PCM_16BIT))
+        }
+        return out
+    }
+
+    /** Move to the next combination. One place decides this, so a failed read and a failed open cannot
+     *  disagree about what to try next. Two full cycles with nothing working is not transient: say so. */
+    private fun advanceCursor(n: Int) {
+        capCursor++
+        if (capCursor >= n) {
+            capCursor = 0
+            capCycles++
+            if (capCycles >= 2) {
+                capDead = true
+                try { Thread.sleep(800) } catch (e: InterruptedException) { }
+            }
+        }
     }
 
     /** The capture sources this platform will accept, most processed-avoiding first. */
@@ -354,7 +377,11 @@ class AudioEngine(
 
     private fun openInput(src: Int, encoding: Int, frames: Int): AudioRecord? = try {
         val minBytes = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, encoding)
-        val bytes = if (minBytes > 0) maxOf(minBytes, frames * bytesPerSample(encoding)) else frames * bytesPerSample(encoding)
+        // Twice the minimum, and always at least two read blocks: ERROR_BAD_VALUE (-2) from read() is
+        // what a device returns when the buffer it was constructed with is smaller than it wants, and
+        // the field report is full of -2.
+        val want = frames * bytesPerSample(encoding) * 2
+        val bytes = if (minBytes > 0) maxOf(minBytes * 2, want) else want
         val r = AudioRecord(src, sampleRate, AudioFormat.CHANNEL_IN_MONO, encoding, bytes)
         if (r.state == AudioRecord.STATE_INITIALIZED) r else { r.release(); null }
     } catch (e: Exception) {
@@ -426,7 +453,7 @@ class AudioEngine(
         append(sampleRate).append(" Hz mono float, period ")
         append(maxOf(1, sampleRate / 50)).append(" frames, capture ")
         append(encodingName(capEncoding)).append(" from ")
-        append(if (inputSourceName.get() >= 0) sourceName(inputSourceName.get()) else "no source yet")
+        append(capCombo)
         if (!capOpen) append(", CAPTURE NOT OPEN")
         if (capDead) append(" (every input source this device offers was refused)")
         if (capRate > 0 && outRate > 0 && (capRate != sampleRate || outRate != sampleRate))
