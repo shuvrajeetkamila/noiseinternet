@@ -250,6 +250,12 @@ struct LinkOptions {
   int aec_taps = 1024;     // full duplex only: NLMS taps
   int aec_step = 30;       // mu*1000
   bool allow_plaintext_test = false;  // tests only
+  // Real-hardware assistance, off by default so that every measured sweep in reports/ keeps meaning
+  // what it meant. When on: the slave emits a KEEPALIVE beacon in its reply window even when it has
+  // heard nothing (otherwise a receiver that hears nothing is completely silent, which is
+  // indistinguishable from a broken app), and the app sweeps its own output level while unpaired
+  // (NodeConfig::assist).
+  bool assist = false;
 };
 
 // Drives one endpoint. Thread-safety: call from one thread; feed_pcm may be called from an
@@ -272,6 +278,9 @@ class AcousticLink {
   // playback (its own buffers, not just ours). See AcousticLink::tick: turn-taking has to be
   // measured against what has actually gone out over the wire.
   void set_tx_backlog(size_t samples) { tx_backlog_ = (int64_t)samples; }
+  // Runtime output level in full-scale fractions (see Modem::set_tx_amplitude).
+  void set_tx_amplitude(double a);
+  double tx_amplitude() const { return opt_.modem.tx_amplitude; }
   // Service timers, do ARQ work, decide to transmit. Called every ~5-10 ms of *device* time.
   int tick(int64_t now_ms);
 

@@ -34,6 +34,7 @@ int Node::ensure_built() {
   o.aec_taps = cfg_.aec_taps;
   o.listen_ms = cfg_.listen_ms;
   o.turnaround_ms = cfg_.turnaround_ms;
+  o.assist = cfg_.assist;
   o.arq.require_crypto = !cfg_.allow_plaintext_test;
   o.arq.max_retries = cfg_.max_retransmit;
   o.arq.session_id = cfg_.session_id;
@@ -215,6 +216,23 @@ int Node::pull_playback(float* out, size_t cap) {
 int Node::step(int64_t now) {
   now_ms = now;
   if (!running_) return NI_ERR_STATE;
+  // Level hunt while unpaired (NodeConfig::assist). The failure this exists for is the most common one
+  // in a real room and the least diagnosable from a panel: the far end hears *something*, but the
+  // burst is either too quiet to decode or loud enough to distort in the speaker. Nothing here knows
+  // which, and the user has no meter for it, so the level walks a small ladder - 0.85, 0.5, 0.3, 1.0 -
+  // every 8 s until the link pairs, and then stays where it landed. Both ends do this independently;
+  // they do not have to agree, because this is only about loudness.
+  if (cfg_.assist && link_) {
+    Pairing* pr = link_->pairing();
+    const bool paired = pr != nullptr && pr->state() == NI_PAIR_DONE;
+    if (!paired && now_ms >= hunt_next_ms_) {
+      static const double kLadder[] = {0.85, 0.5, 0.3, 1.0};
+      tx_gain_ = kLadder[(size_t)(hunt_step_++ % 4)];
+
+      link_->set_tx_amplitude(tx_gain_);
+      hunt_next_ms_ = now_ms + 8000;
+    }
+  }
   // Turn-taking is timed against played sound, not handed-out sound. With a modelled channel the
   // node knows the whole queue itself. Without one - that is, in the Windows and Android apps - the
   // only place that knows is the audio backend, which is why the apps call set_tx_backlog() with
@@ -463,6 +481,57 @@ int Node::test_internet(int64_t now, const std::string& url, InternetVerify* out
 }
 
 // ------------------------------------------------------------------ snapshots
+// The panel sentence. Written once here so the Windows window, the console and the Android panel all
+// say the same thing about the same numbers; the alternative is three UIs each guessing, which is how
+// "it does not work" survives three builds.
+static std::string status_advice(const StatusSnapshot& s) {
+  std::ostringstream o;
+  if (!s.running) {
+    return "the engine is not running: press Start. Nothing is transmitted until you do.";
+  }
+  if (s.pairing == "paired") {
+    return "paired: both ends show the same match code and data can flow both ways. The rate on this " \
+           "panel is what this session delivered, not an internet speed.";
+  }
+  if (s.in_dbfs <= -119.5) {
+    return "no sound has reached the engine at all (the microphone level has never moved off -120 " \
+           "dBFS): the microphone path is the problem, not the room. Check the microphone permission, " \
+           "close any other app that may hold the microphone, and read the audio line below - it names " \
+           "the capture format and the input source that is running.";
+  }
+  if (s.sync_hits == 0 && s.frames_received == 0) {
+    if (s.in_dbfs < -65.0) {
+      o << "the microphone hears only a very quiet room (" << (int)(s.in_dbfs + 0.5)
+        << " dBFS) and no bursts. Move the two devices 20-30 cm apart, raise the other device's " \
+           "volume, and make sure it is started as GIVER - a receiver stays silent until it hears " \
+           "something.";
+      return o.str();
+    }
+    if (s.in_dbfs > -10.0) {
+      o << "the microphone input is very loud (" << (int)(s.in_dbfs + 0.5)
+        << " dBFS) and no burst decodes: lower the other device's volume or move it further away. A " \
+           "too-loud signal distorts in the speaker and is as unusable as a silent one.";
+      return o.str();
+    }
+    o << "the microphone hears the room (" << (int)(s.in_dbfs + 0.5)
+      << " dBFS) but no bursts decode: check that the other device is running as GIVER, that both " \
+         "ends show the SAME profile number and session id, and that no Bluetooth headset or speaker " \
+         "is in the path.";
+    return o.str();
+  }
+  if (s.frames_received == 0) {
+    o << "bursts are arriving and their sync is found, but nothing decodes (" << s.sync_hits
+      << " so far): the two ends most likely disagree on the profile number, the session id or the " \
+         "passphrase. Both numbers are shown on this panel - make them identical on both devices.";
+    return o.str();
+  }
+  o << "frames are decoding (" << s.frames_received
+    << " so far) but pairing has not completed: compare the passphrases - both ends must have the " \
+       "SAME passphrase, at least 8 characters. The match code appears on this panel as soon as " \
+       "pairing succeeds.";
+  return o.str();
+}
+
 StatusSnapshot Node::snapshot() const {
   StatusSnapshot s;
   s.name = cfg_.name;
@@ -476,6 +545,7 @@ StatusSnapshot Node::snapshot() const {
   s.sample_rate = cfg_.fs;
   s.mtu = link_ ? link_->arq().config().max_payload : 0;
   s.audio_note = audio_note_;
+  s.tx_gain = tx_gain_;
   if (link_) {
     const ArqStats& a = link_->arq().stats();
     s.peer_online = link_->peer_online();
@@ -522,6 +592,7 @@ StatusSnapshot Node::snapshot() const {
     s.rx_no_frame = link_->counters().rx_no_frame;
   }
   s.tunnel_detail = rproxy_ ? rproxy_->describe() : std::string("no local proxy on this role");
+  s.advice = status_advice(s);   // last, because it reads every field above
   if (gproxy_) s.tunnel_detail += " [giver: " + gproxy_->describe() + "]";
   s.internet_ok = peer_netinfo_valid_ && peer_netinfo_.http_ok;
   std::ostringstream io;
@@ -557,7 +628,8 @@ std::string StatusSnapshot::to_json() const {
     << ", \"retransmits\": " << retries << ", \"crc_fail\": " << crc_fail << ", \"mtu\": " << mtu
     << ", \"tunnel_up\": " << (tunnel_up ? "true" : "false") << ", \"tunnel_detail\": \"" << tunnel_detail
     << "\", \"internet_ok\": " << (internet_ok ? "true" : "false") << ", \"internet_detail\": \""
-    << internet_detail << "\", \"audio_note\": \"" << audio_note << "\"}";
+    << internet_detail << "\", \"tx_gain\": " << tx_gain
+    << ", \"advice\": \"" << advice << "\", \"audio_note\": \"" << audio_note << "\"}";
   return o.str();
 }
 

@@ -102,6 +102,12 @@ int main() {
     NT_CHECK_MSG(s.find("NOT TESTED") != std::string::npos || s.find("audio") != std::string::npos,
                  "status JSON must carry the audio caveat so no shell can render a clean bill of "
                  "health without it");
+    // The panel sentence and the output level: the Android panel reads this JSON rather than the C++
+    // struct, so a key missing here is a blank line on a phone (defect 46 was exactly that, four times).
+    NT_CHECK_MSG(s.find("\"advice\"") != std::string::npos,
+                 "status JSON must carry the engine's own advice sentence");
+    NT_CHECK_MSG(s.find("\"tx_gain\"") != std::string::npos,
+                 "status JSON must carry the output level the engine is using");
 
     // Input validation, which is what the FFI boundary is for: a null buffer is refused, a zero-length
     // read from AudioRecord is a no-op with a real pointer, and neither may ever crash the process.
@@ -130,6 +136,46 @@ int main() {
 
     NT_EQ(ni_abi_stop(n), NI_OK);
     NT_EQ(ni_abi_destroy(n), NI_OK);
+  }
+
+  // ---- assist: the two behaviours that only exist for real rooms, checked for the contract the
+  // panels depend on. Neither can be exercised against a sound card here; what can be checked is that
+  // the sweep actually sweeps, because a level ladder that does not move is a feature that silently
+  // does nothing on the one device it was written for.
+  {
+    const char* assist_cfg =
+        "{\"name\":\"assist\",\"role\":\"giver\",\"profile\":10,\"fs\":48000,\"session_id\":7,"
+        "\"pairing_secret\":\"assist-test-1\",\"assist\":true}";
+    err[0] = 0;
+    NiNode* a = ni_abi_create(assist_cfg, err, (int)sizeof(err));
+    NT_CHECK_MSG(a != nullptr, "a config with assist on is accepted");
+    if (a) {
+      NT_EQ(ni_abi_start(a), NI_OK);
+      std::vector<double> gains;
+      bool advice_seen = false;
+      for (int t = 1000; t <= 21000; t += 500) {
+        ni_abi_step(a, t);
+        if (t % 4000 == 0) {
+          char* st2 = ni_abi_status_json(a);
+          std::string j = st2 ? st2 : "";
+          ni_abi_free(st2);
+          size_t k = j.find("\"tx_gain\": ");
+          if (k != std::string::npos) gains.push_back(atof(j.c_str() + k + 11));
+          size_t w = j.find("\"advice\": \"");
+          if (w != std::string::npos && j.size() > w + 12) advice_seen = true;
+        }
+      }
+      NT_CHECK_MSG(gains.size() >= 4, "tx_gain is reported on every status read");
+      bool moved = false;
+      for (size_t i = 1; i < gains.size(); ++i)
+        if (gains[i] != gains[0]) moved = true;
+      NT_CHECK_MSG(moved,
+                   "with assist on and nothing paired the output level must move off its starting "
+                   "value: that sweep is what covers a room that is too loud or too quiet");
+      NT_CHECK_MSG(advice_seen, "the advice sentence is present while the link is unpaired");
+      NT_EQ(ni_abi_stop(a), NI_OK);
+      NT_EQ(ni_abi_destroy(a), NI_OK);
+    }
   }
 
   // ---- the stateless PHY helpers, which is what "play this file" / "decode this recording" use ----

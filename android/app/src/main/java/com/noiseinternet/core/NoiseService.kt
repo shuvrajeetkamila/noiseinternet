@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -106,6 +107,20 @@ class NoiseService : VpnService(), AudioEngine.Sink {
         var recvSeq: Int = 0,
     )
 
+    /**
+     * The rate this phone's output mixer actually runs at. `AudioManager.getProperty` is the only
+     * honest source: it is what the HAL uses, so it is the rate at which no resampling happens.
+     */
+    private fun nativeSampleRate(): Int {
+        return try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            val r = am?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: 48000
+            if (r in 16000..192000) r else 48000
+        } catch (e: Exception) {
+            48000
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -126,7 +141,11 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             profile = intent?.getIntExtra(EXTRA_PROFILE, 10) ?: 10,
             pairingSecret = intent?.getStringExtra(EXTRA_SECRET) ?: "",
             sessionId = intent?.getIntExtra(EXTRA_SESSION, 7) ?: 7,
-            sampleRate = intent?.getIntExtra(EXTRA_FS, 48000) ?: 48000,
+            // Not a hard-coded 48000: asking a 44.1 kHz device for 48 kHz makes the platform resample
+            // the stream, which shifts every tone of the burst by that ratio. The result is perfectly
+            // audible and completely undecodable at the other end - the one failure mode that looks
+            // like the app working. The engine asks the platform what it actually runs at.
+            sampleRate = intent?.getIntExtra(EXTRA_FS, 0)?.takeIf { it > 0 } ?: nativeSampleRate(),
             duplex = intent?.getBooleanExtra(EXTRA_DUPLEX, false) ?: false,
             proxyEnable = true,
         )

@@ -89,6 +89,11 @@ class AudioEngine(
     // The microphone the user picked, remembered for every (re)open - the recorder is created by the
     // capture thread now, so start() can no longer attach the preference to an object it owns.
     @Volatile private var prefInput: AudioDeviceInfo? = null
+    // The rates the platform actually gave us, which are not always the rate we asked for: Android
+    // silently resamples when the hardware runs at 44.1 kHz. A resampled burst is audible and
+    // undecodable, so the panel has to say which rate is real (see NoiseService.nativeSampleRate).
+    @Volatile private var capRate = 0
+    @Volatile private var outRate = 0
     // Frames this class has handed to the AudioTrack. `AudioTrack.getFramesWritten()` is a hidden API
     // (the Kotlin build failed on it: "Unresolved reference"), so the count is kept here from write()'s
     // own return value, which is public and exact.
@@ -173,6 +178,7 @@ class AudioEngine(
         }
         framesQueued = 0
         running.set(true)
+        outRate = if (Build.VERSION.SDK_INT >= 23) t.sampleRate else sampleRate
 
         prefInput = input
         capFrames = frames
@@ -275,6 +281,7 @@ class AudioEngine(
                         }
                         capRebuilds++
                         capOpen = true
+                        capRate = if (Build.VERSION.SDK_INT >= 23) nr.sampleRate else sampleRate
                         fails = 0
                         opened = true
                         break
@@ -422,6 +429,8 @@ class AudioEngine(
         append(if (inputSourceName.get() >= 0) sourceName(inputSourceName.get()) else "no source yet")
         if (!capOpen) append(", CAPTURE NOT OPEN")
         if (capDead) append(" (every input source this device offers was refused)")
+        if (capRate > 0 && outRate > 0 && (capRate != sampleRate || outRate != sampleRate))
+            append(", DEVICE RESAMPLED (asked $sampleRate, capture $capRate, playback $outRate Hz)")
         if (capReadFailures > 0) append(", failed reads ").append(capReadFailures)
         if (capRebuilds > 1) append(", capture reopened ").append(capRebuilds - 1).append(" times")
         append(", capture route ").append(routedInput)

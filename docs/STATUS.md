@@ -244,7 +244,15 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    `StatusSnapshot::to_json()`. **Defect 47**: `WasapiEngine::capture` released a whole device packet
    after copying only the part that fitted in the caller's buffer, dropping the rest silently - it keeps a
    hold-over buffer now and drops nothing, which matters because the lost samples fall inside the burst
-   the far end is decoding. The phone's capture path was rewritten in the same pass: one recorder instead
+   the far end is decoding. **Defects 49-52**, from the user saying the numbers were too hard to read:
+   with `assist` on (window + APK) a receiver beacons every 4 s even when it has heard nothing - the
+   silence is what made a dead microphone and a dead app indistinguishable - each end sweeps its own
+   output level down 0.85/0.5/0.3/1.0 until the link pairs (hardware speakers distort at full scale and
+   nothing on the transmitting end can see it), the engine writes one plain sentence (the new `advice`
+   field) that both front ends print above the numbers, the Android app asks the platform for its real
+   sample rate instead of demanding 48 kHz and now shows `DEVICE RESAMPLED` when the device resamples
+   (audible-but-undecodable), and the ABI's own JSON scanner stopped matching key names that appear as
+   values. t_abi asserts the sweep moves: 48 checks, 0 failures; `ctest` 8/8. The phone's capture path was rewritten in the same pass: one recorder instead
    of two (`start()` opened one and `captureLoop()` opened a second, unreleased, both holding the
    microphone), float capture with automatic fallback to 16-bit PCM, a failed read retried instead of
    ending the session, and the panel's `audio:` line now names the source, the format, the failed-read

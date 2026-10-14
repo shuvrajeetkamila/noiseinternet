@@ -84,6 +84,7 @@ void print_status(App& app) {
   printf("tunnel            : %s  %s\n", s.tunnel_up ? "up" : "down", s.tunnel_detail.c_str());
   printf("internet          : %s  %s\n", s.internet_ok ? "verified" : "not verified",
          s.internet_detail.c_str());
+  if (!s.advice.empty()) printf("WHAT TO DO        : %s\n", s.advice.c_str());
   if (!s.audio_note.empty()) printf("NOTE              : %s\n", s.audio_note.c_str());
   printf("=================================================================\n");
   fflush(stdout);

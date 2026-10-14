@@ -23,7 +23,20 @@ namespace {
 // ------------------------------------------------------------------ flat JSON scanning
 std::string jstring(const std::string& j, const std::string& key) {
   std::string pat = "\"" + key + "\"";
-  size_t p = j.find(pat);
+  // The pattern has to be a KEY, not just any occurrence of those characters: a config whose value
+  // happens to spell the same word (for example {"name":"assist","assist":true}) used to hijack the
+  // lookup, because the scanner took the first match and then found the next colon after it - which
+  // belonged to the following key. Every field read through this function could silently come back
+  // as its default when another field's *value* matched its name.
+  size_t p = std::string::npos;
+  for (size_t at = j.find(pat); at != std::string::npos; at = j.find(pat, at + 1)) {
+    size_t q = at + pat.size();
+    while (q < j.size() && (j[q] == ' ' || j[q] == '\t')) q++;
+    if (q < j.size() && j[q] == ':') {
+      p = at;
+      break;
+    }
+  }
   if (p == std::string::npos) return "";
   p = j.find(':', p + pat.size());
   if (p == std::string::npos) return "";
@@ -148,6 +161,7 @@ NiNode* ni_abi_create(const char* config_json, char* err, int err_cap) {
   if (!bind.empty()) c.proxy_bind = bind;
   c.proxy_token = jstring(proxy, "token");
   c.sim_channel = jbool(j, "sim_channel", false);
+  c.assist = jbool(j, "assist", false);
   c.arq_wait_ms = (int)jnum(j, "arq_wait_ms", c.arq_wait_ms);
   c.calibrate_trials = (int)jnum(j, "calibrate_trials", c.calibrate_trials);
   c.ch.fs = c.fs;

@@ -277,6 +277,9 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("state ").append(st.state).append("  role ").append(st.role)
             append("  profile ").append(st.profile)
             st.sampleRate?.let { append("  fs ").append(it.toInt()) }
+            if (st.advice.isNotBlank()) {
+                append("\n\nWHAT TO DO: ").append(st.advice).append("\n")
+            }
             append("\npeer ").append(if (st.peerOnline) "online" else "offline")
             append("  pairing ").append(st.pairing)
             append("\nmatch code: ").append(st.sas.ifBlank { "(not paired yet)" })
@@ -284,6 +287,7 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("\ninput ").append(st.f(st.inDbfs)).append(" dBFS")
             append("  bursts seen ").append(st.n(st.syncHits))
             append("  decoded ").append(st.n(st.framesReceived))
+            st.txGain?.let { append("\nout level ").append(String.format("%.2f", it)).append(" of full scale") }
             append("\nwhy: ").append(st.diagnosis())
             append("  mtu ").append(st.n(st.mtu))
             append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")

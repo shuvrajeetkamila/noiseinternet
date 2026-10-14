@@ -368,6 +368,10 @@ struct App {
     cfg.enable_giver_fetch = (cfg.role == NI_ROLE_GIVER);
     cfg.proxy_port = 8471;
     cfg_proxy_port_ = (unsigned)cfg.proxy_port;
+    // Assist: on for the window, because this is the build a person runs in a room with no meter and no
+    // protocol knowledge. It sweeps our own output level while unpaired and lets a receiver beacon, so
+    // that "nothing happens and nothing says why" cannot be the user's whole experience.
+    cfg.assist = true;
     if (cfg.pairing_secret.size() < 8)
       say(L"warning: a short passphrase is weak - the core prints the entropy it actually got.");
 
@@ -443,6 +447,8 @@ struct App {
              s.peer_online ? "ONLINE" : "offline", (long long)s.peer_seen_ms, s.pairing.c_str());
     t += fmt(L"match code: %hs   <- must read identically on the other device\r\n",
              s.sas.empty() ? "(not paired yet)" : s.sas.c_str());
+    // The engine's own sentence first, because it is the only line that tells the user what to do.
+    if (!s.advice.empty()) t += w8(s.advice) + L"\r\n\r\n";
     t += fmt(L"input %.1f dBFS   bursts seen %llu   decoded %llu   callbacks with no signal %llu\r\n",
              s.in_dbfs, (unsigned long long)s.sync_hits, (unsigned long long)s.frames_received,
              (unsigned long long)s.rx_no_frame);
@@ -456,6 +462,8 @@ struct App {
              (unsigned long long)s.malformed);
     t += fmt(L"bytes sent %llu  received %llu\r\n", (unsigned long long)s.bytes_sent,
              (unsigned long long)s.bytes_received);
+    t += fmt(L"output level        : %.2f of full scale%s\r\n", s.tx_gain,
+             s.advice.empty() ? L"" : L"  (swept while unpaired)");
     t += fmt(L"tunnel %hs: %hs\r\n", s.tunnel_up ? "up" : "down", s.tunnel_detail.c_str());
     // The proxy refuses every client that does not present its bearer token, and the session's token
     // only exists once the node is running - so the window has to show it, or nobody could point a

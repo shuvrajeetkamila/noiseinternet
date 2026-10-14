@@ -33,6 +33,7 @@ class NoiseCore(config: Config) {
         val proxyEnable: Boolean = true,
         val proxyToken: String = "",
         val allowPlaintextTest: Boolean = false,
+        val assist: Boolean = true,
     ) {
         fun toJson(): String = JSONObject().apply {
             put("name", name)
@@ -51,6 +52,9 @@ class NoiseCore(config: Config) {
                 if (proxyToken.isNotEmpty()) put("token", proxyToken)
             })
             put("allow_plaintext_test", allowPlaintextTest)
+            // Assist: the level sweep and the receiver beacon. The phone is the end most likely to be
+            // silent for reasons nobody can see from the panel, so it gets both.
+            put("assist", assist)
         }.toString()
     }
 
@@ -110,6 +114,11 @@ class NoiseCore(config: Config) {
 
     /** Parsed view of ni_abi_status_json(). Unset numbers stay null rather than defaulting to 0. */
     data class Status(
+        // The engine's own one-sentence diagnosis (node.cpp: status_advice) and the output level it is
+        // currently using. The panel prints the sentence first: a person who cannot read counters can
+        // still read a sentence, and both apps show the same words because the engine writes them.
+        val advice: String = "",
+        val txGain: Double? = null,
         val state: String,
         val role: String,
         val profile: String,
@@ -161,7 +170,7 @@ class NoiseCore(config: Config) {
                         mtu = null, tunnelUp = false, internetOk = false,
                         audioNote = "status JSON could not be parsed: ${e.message}", inDbfs = null,
                         syncHits = null, rxNoFrame = null, pairingNote = "", pairing = "unknown",
-                        sas = "", raw = json,
+                        sas = "", advice = "", txGain = null, raw = json,
                     )
                 }
 
@@ -205,6 +214,8 @@ class NoiseCore(config: Config) {
                     pairingNote = o.optString("pairing_note", ""),
                     pairing = o.optString("pairing", "none"),
                     sas = o.optString("sas", ""),
+                    advice = o.optString("advice", ""),
+                    txGain = d("tx_gain"),
                     raw = json,
                 )
             }

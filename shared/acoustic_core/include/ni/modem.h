@@ -81,6 +81,12 @@ class Modem {
   const CarrierMap& map() const { return map_; }
   double sample_rate() const { return cfg_.sample_rate; }
   int max_payload() const { return max_payload_; }
+  // Output level. The rendered burst is normalised to this peak, so this one number decides whether
+  // the far end sees a clean signal, a clipped mess, or nothing measurable - and the right value
+  // depends on two speakers, two microphones and a room, none of which is knowable at build time.
+  // Node::step sweeps it while unpaired (NodeConfig::assist); see reports/RESULTS.md defect 49.
+  double tx_amplitude() const { return cfg_.tx_amplitude; }
+  void set_tx_amplitude(double a) { cfg_.tx_amplitude = a < 0.02 ? 0.02 : (a > 1.0 ? 1.0 : a); }
   int cp() const { return cp_; }  // this profile's cyclic-prefix length in samples
 
   // ---- transmit side ---------------------------------------------------------

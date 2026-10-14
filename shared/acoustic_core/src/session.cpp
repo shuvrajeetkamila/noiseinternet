@@ -357,6 +357,16 @@ int AcousticLink::take_pcm(float* out, size_t cap) {
   return (int)take;
 }
 
+// How often an assisting slave says something when it has heard nothing. Long enough not to eat the
+// master's airtime, short enough that a person watching the panel sees activity within a few seconds.
+static const int64_t kAssistBeaconMs = 4000;
+
+void AcousticLink::set_tx_amplitude(double a) {
+  opt_.modem.tx_amplitude = a < 0.02 ? 0.02 : (a > 1.0 ? 1.0 : a);
+  if (modem_) modem_->set_tx_amplitude(opt_.modem.tx_amplitude);
+  if (modem_alt_) modem_alt_->set_tx_amplitude(opt_.modem.tx_amplitude);
+}
+
 int AcousticLink::tick(int64_t now_ms) {
   now_ms_ = now_ms;
   if (!running_ || !modem_) return NI_ERR_STATE;
@@ -390,6 +400,13 @@ int AcousticLink::tick(int64_t now_ms) {
   }
   arq_.on_timer(now_ms);
 
+  // A receiver that has heard nothing used to be silent in the literal sense - no burst, no sound, no
+  // evidence that its transmitter works - which is indistinguishable from an app whose audio is dead.
+  // With assist on it emits a KEEPALIVE beacon every few seconds even when it has heard nothing, so
+  // the other end can measure this direction and the user can hear the receiver is alive.
+  Pairing* pr = pairing();
+  const bool paired_now = pr != nullptr && pr->state() == NI_PAIR_DONE;
+  bool beacon_due = false;
   bool may_tx = false;
   if (!playing) {
     if (opt_.duplex == 1) {
@@ -397,10 +414,14 @@ int AcousticLink::tick(int64_t now_ms) {
     } else if (opt_.is_master) {
       may_tx = now_ms - last_tx_end_ms_ >= opt_.turnaround_ms;
     } else {
-      // slave: speak only in the reply window after the master's burst
-      may_tx = (arq_.tx_pending() || ack_due_) && now_ms - last_peer_burst_ms_ >= opt_.turnaround_ms &&
-               now_ms - last_peer_burst_ms_ < opt_.turnaround_ms + 4 * std::max(200, (int)airtime_est_ms_);
-      if (!may_tx && arq_.tx_pending() && now_ms - last_peer_burst_ms_ > opt_.listen_ms + 2000)
+      // slave: speak in the reply window after the master's burst; and, when assisting, speak anyway
+      // on the beacon interval, so the pair is never a silent mystery.
+      beacon_due = opt_.assist && !paired_now && now_ms - last_tx_end_ms_ >= kAssistBeaconMs;
+      const bool heard_recently =
+          now_ms - last_peer_burst_ms_ >= opt_.turnaround_ms &&
+          now_ms - last_peer_burst_ms_ < opt_.turnaround_ms + 4 * std::max(200, (int)airtime_est_ms_);
+      may_tx = (arq_.tx_pending() || ack_due_ || beacon_due) && heard_recently;
+      if (!may_tx && (arq_.tx_pending() || beacon_due) && now_ms - last_peer_burst_ms_ > opt_.listen_ms + 2000)
         may_tx = true;  // master has gone quiet: take a turn so ACKs are not stuck
     }
   }
@@ -415,7 +436,7 @@ int AcousticLink::tick(int64_t now_ms) {
     // acked, and were re-packed on every tick. See reports/RESULTS.md 4.6.
     size_t phy = (size_t)modem_->max_payload();
     size_t cap = phy < sizeof buf ? phy : sizeof buf;
-    int n = arq_.build_pdu(now_ms, buf, cap, &len, opt_.is_master);
+    int n = arq_.build_pdu(now_ms, buf, cap, &len, opt_.is_master || beacon_due);
     if (n > 0 && len >= 2) {
       last_packed_frames_ = (size_t)n;
       tx_samples_total_ = (size_t)modem_->burst_samples_for(len);
@@ -436,7 +457,8 @@ std::string AcousticLink::diagnostics_json() const {
     << (opt_.is_master ? "true" : "false") << ", \"state\": " << state_ << ", \"state_name\": \""
     << ni_state_name(state_) << "\", \"profile\": \""
     << (modem_ ? modem_->profile().name : "?") << "\", \"sample_rate\": "
-    << opt_.modem.sample_rate << ", \"mtu\": " << (modem_ ? modem_->max_payload() : 0)
+    << opt_.modem.sample_rate << ", \"tx_gain\": " << opt_.modem.tx_amplitude
+    << ", \"mtu\": " << (modem_ ? modem_->max_payload() : 0)
     << ", \"turnaround_ms\": " << opt_.turnaround_ms << ", \"listen_ms\": " << opt_.listen_ms
     << ", \"measured_airtime_ms\": " << airtime_est_ms_ << ", \"peer_online\": "
     << (peer_seen_ms_ && now_ms_ - peer_seen_ms_ < 8000 ? "true" : "false")

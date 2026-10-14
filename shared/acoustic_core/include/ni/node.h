@@ -19,6 +19,12 @@ struct NodeConfig {
   int profile_id = 10;         // FD-LOW-DBPSK: the profile every measured end-to-end run delivered on
   double fs = 48000.0;
   double tx_amplitude = 0.85;
+  // Assist: what makes this app work in a real room without the user knowing any of the numbers.
+  // It sweeps our own output level while unpaired (the right value depends on the speaker, the
+  // microphone and the distance) and lets a receiver emit a keepalive beacon so that it is never
+  // silently indistinguishable from a dead app. Off by default: the measured sweeps in reports/ were
+  // taken without it, and turning it on by default would quietly change every one of them.
+  bool assist = false;
   // 0x0007 in both apps, and both apps must agree on it or the two ends are talking to different
   // sessions. Two apps whose defaults differ cannot pair by accident, and that was one of the ways a
   // first field test failed silently: the phone defaulted to profile 2 / session 0 while the PC
@@ -88,6 +94,11 @@ struct StatusSnapshot {
   bool tunnel_up = false, internet_ok = false;
   std::string tunnel_detail, internet_detail;
   int mtu = 0;
+  double tx_gain = 0;          // the output level actually in use (assist sweeps it)
+  // One sentence, in plain words, saying what this end sees and what to do about it - computed in the
+  // engine from its own counters so that both front ends print the same diagnosis instead of each
+  // inventing its own wording. Empty only when there is nothing useful to say (paired and healthy).
+  std::string advice;
   std::string audio_note;      // "NOT TESTED: no audio hardware in this environment" etc.
   std::string to_json() const;
 };
@@ -192,6 +203,10 @@ class Node {
   int64_t peer_netinfo_ms_ = 0;
   PhyStats last_phy_{};
   std::string last_verify_;
+  // assist bookkeeping: the output level in use and when to move to the next rung
+  double tx_gain_ = 0.85;
+  int hunt_step_ = 0;
+  int64_t hunt_next_ms_ = 0;
   std::vector<uint8_t> tx_dump_;
   bool tx_dump_on_ = false;
   // calibration bookkeeping
