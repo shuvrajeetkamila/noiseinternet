@@ -186,7 +186,9 @@ jobs:
           # back as zero instead of being papered over. Bounded at 60 s so a stuck message loop cannot hold
           # the release job hostage.
           $p = Start-Process -FilePath "$out\NoiseInternet.exe" -ArgumentList '--ui-check' -PassThru -WorkingDirectory $out -WindowStyle Hidden
+          $ui_ok = $false
           if ($p.WaitForExit(60000)) {
+            $ui_ok = ($p.ExitCode -eq 0)
             "pkg: ui-check exited with code $($p.ExitCode) (0 = window and every control created)" | Out-File -Append pkg.log
           } else {
             $p.Kill()
@@ -195,7 +197,18 @@ jobs:
           if (Test-Path "$out\ui-check.txt") {
             Get-Content "$out\ui-check.txt" | Out-File -Append -Encoding utf8 pkg.log
           } else {
-            "pkg: ui-check wrote no ui-check.txt (window creation probably failed; exit code above)" | Out-File -Append pkg.log
+            $ui_ok = $false
+            "pkg: ui-check wrote no ui-check.txt (window creation or the enumeration failed; see the exit code above)" | Out-File -Append pkg.log
+          }
+          # This is not decoration. The first run of this step exited 0xC0000005 and wrote no file: the app
+          # crashed where nothing had ever looked, and a bundle containing that exe would have looked
+          # completely normal. A front end that cannot pass its own smoke test does not get published; the
+          # APK is a separate artifact and still ships.
+          if (-not $ui_ok) {
+            "pkg: REFUSING TO PUBLISH - the shipped exe failed its own --ui-check. The trace above (the file"
+            " | Out-File -Append pkg.log
+            "pkg: it wrote, or the exit code if it wrote nothing) is the diagnosis." | Out-File -Append pkg.log
+            exit 6
           }
           # Where the MSVC runtime DLLs live on this runner. Copied, not built: unmodified redist files.
           $vs = ''

@@ -68,11 +68,56 @@ std::wstring fmt(const wchar_t* f, ...) {
   return std::wstring(buf.data(), (size_t)n);
 }
 
+// A breadcrumb log written with Win32 calls only (no CRT, no buffering): if the window ever dies on a
+// machine nobody is watching, the file says which step it reached and what the exception was. This exists
+// because the first CI run of `--ui-check` exited -1073741819 (0xC0000005) and wrote no file at all, which
+// is exactly the result a build log cannot explain: the app has to say where it died.
+struct Trace {
+  HANDLE h = INVALID_HANDLE_VALUE;
+  void open(const wchar_t* path) {
+    if (h != INVALID_HANDLE_VALUE) return;
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      const unsigned char bom[2] = {0xFF, 0xFE};   // UTF-16LE; PowerShell's Get-Content wants the BOM
+      DWORD w = 0;
+      WriteFile(h, bom, 2, &w, nullptr);
+    }
+  }
+  void line(const std::wstring& s) {
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    WriteFile(h, s.data(), (DWORD)(s.size() * sizeof(wchar_t)), &w, nullptr);
+    WriteFile(h, L"\r\n", 4, &w, nullptr);
+  }
+  void close() {
+    if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); h = INVALID_HANDLE_VALUE; }
+  }
+};
+Trace g_trace;
+const wchar_t* g_trace_path = L"gui-crash.txt";
+
+LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
+  g_trace.open(g_trace_path);
+  const EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : nullptr;
+  wchar_t buf[512];
+  swprintf_s(buf, L"FATAL: unhandled exception 0x%08lX at address %p - the last step above is where it "
+                  L"died. Nothing was transmitted. If this happened while the device list was being read, "
+                  L"remember that a build agent has no audio endpoints and the app has to report zero, "
+                  L"not die.",
+             er ? (unsigned long)er->ExceptionCode : 0ul,
+             er ? (const void*)er->ExceptionAddress : (const void*)nullptr);
+  g_trace.line(buf);
+  g_trace.close();
+  return EXCEPTION_EXECUTE_HANDLER;   // terminate now: a GUI crash dialog on a build agent hangs the job
+}
+
 // EnumChildWindows wants a WNDENUMPROC: a capture-less lambda happens to convert on x64, but the
 // calling convention a lambda ends up with is not something this code should be betting on, so the
 // control-dump visitor is an ordinary function.
 struct ChildDump {
-  std::wstring* out;
+  Trace* t;
+  int count;
 };
 BOOL CALLBACK child_dump(HWND h, LPARAM l) {
   ChildDump* c = reinterpret_cast<ChildDump*>(l);
@@ -81,9 +126,10 @@ BOOL CALLBACK child_dump(HWND h, LPARAM l) {
   SendMessageW(h, WM_GETTEXT, 255, (LPARAM)txt);
   RECT r;
   GetWindowRect(h, &r);
-  c->out->append(fmt(L"  %-12s enabled=%c visible=%c %4dx%-4d  \"%ls\"\r\n", cls,
-                     IsWindowEnabled(h) ? L'y' : L'n', IsWindowVisible(h) ? L'y' : L'n', r.right - r.left,
-                     r.bottom - r.top, txt));
+  ++c->count;
+  c->t->line(fmt(L"  ctrl %2d  %-12s enabled=%ls visible=%ls %4dx%-4d  \"%ls\"", c->count, cls,
+                 IsWindowEnabled(h) ? L"yes" : L"no", IsWindowVisible(h) ? L"yes" : L"no",
+                 r.right - r.left, r.bottom - r.top, txt));
   return TRUE;
 }
 
@@ -129,6 +175,43 @@ struct App {
       SendMessageW(edit, EM_SETSEL, (WPARAM)end, (WPARAM)end);
       SendMessageW(edit, EM_REPLACESEL, FALSE, (LPARAM)(mine[i] + L"\r\n").c_str());
     }
+  }
+
+  // Fill the two device drop-downs from `devs`. Called once with an empty list while the window is being
+  // created (so the boxes are never empty) and again from load_devices() once the enumeration has run.
+  void populate_audio() {
+    SendMessageW(mic, CB_RESETCONTENT, 0, 0);
+    SendMessageW(spk, CB_RESETCONTENT, 0, 0);
+    SendMessageW(mic, CB_ADDSTRING, 0, (LPARAM)L"(system default)");
+    SendMessageW(spk, CB_ADDSTRING, 0, (LPARAM)L"(system default)");
+    for (size_t i = 0; i < devs.size(); ++i) {
+      const AudioDeviceInfo& d = devs[i];
+      std::wstring line = fmt(L"%ls  %.0f Hz  %d ch  %hs", w8(d.name).c_str(), d.nominal_rate, d.channels,
+                              d.api.c_str());
+      if (d.loopback) line += L"   [loopback - cannot be used as a microphone]";
+      SendMessageW(d.is_capture ? mic : spk, CB_ADDSTRING, 0, (LPARAM)line.c_str());
+    }
+    SendMessageW(mic, CB_SETCURSEL, 0, 0);
+    SendMessageW(spk, CB_SETCURSEL, 0, 0);
+  }
+
+  // The machine's real endpoints, read once the window exists. Outside WM_CREATE on purpose: this is the
+  // only part of the front end that talks to COM and to the audio service, and the first CI run died
+  // somewhere around here, so it gets its own step in the trace and its own line in the log.
+  void load_devices() {
+    std::string why;
+    g_trace.line(L"step 2: enumerating audio endpoints (WASAPI)");
+    int n = ni_audio_enumerate(&devs, &why);
+    if (n < 0) {
+      devs.clear();
+      g_trace.line(fmt(L"step 2: enumeration failed (%d): %hs", n, why.c_str()));
+      say(L"device enumeration said: " + w8(why));
+      say(L"this build sees no audio endpoints. That is a fact about the machine, not a bug in the "
+          L"listing: install or enable a device, then press Start.");
+    } else {
+      g_trace.line(fmt(L"step 2: %d endpoint(s) reported", n));
+    }
+    if (mic && spk) populate_audio();
   }
 
   std::wstring combo_text(HWND c) {
@@ -362,27 +445,25 @@ struct App {
 
   // --ui-check: prove the window and its controls exist, and report what the machine actually has.
   void ui_check() {
-    std::wstring o;
-    int nkids = EnumChildWindows(win, nullptr, 0);
-    o += fmt(L"ui-check: window=%hs class=%ls child_windows=%d\r\n",
-             running.load() ? "running" : "created", L"NoiseInternetGui", nkids);
-    ChildDump ctx{&o};
+    g_trace.open(L"ui-check.txt");
+    g_trace.line(fmt(L"ui-check: window=%ls class=%ls, written by the exe that is in this bundle",
+                     running.load() ? "running" : "created", L"NoiseInternetGui"));
+    g_trace.line(L"controls created by the window (class, enabled, visible, size, text):");
+    ChildDump ctx{&g_trace, 0};
     EnumChildWindows(win, child_dump, (LPARAM)&ctx);
-    o += fmt(L"ui-check: audio endpoints seen by the engine: %d (a build agent has none; that is a real "
-             L"answer, not a defect in the UI)\r\n", (int)devs.size());
     int caps = 0, micc = 0;
     for (size_t i = 0; i < devs.size(); ++i) devs[i].is_capture ? ++micc : ++caps;
-    o += fmt(L"ui-check: capture=%d render=%d\r\n", micc, caps);
-    o += fmt(L"ui-check: profiles offered: %d\r\n", (int)profile_ids.size());
-    o += L"ui-check: no audio was opened or transmitted; the acoustic claim is unaffected by this run.\r\n";
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, L"ui-check.txt", L"wb") == 0 && f) {
-      fwrite(o.data(), sizeof(wchar_t), o.size(), f);
-      fclose(f);
-    }
-    printf("%ls", o.c_str());
-    fflush(stdout);
-    ok_ui_check = (nkids >= 14);
+    g_trace.line(fmt(L"total controls: %d", ctx.count));
+    g_trace.line(fmt(L"audio endpoints this machine offered: %d (capture %d, render %d). A build agent has "
+                     L"none; that is the real answer for that machine and it is why no acoustic claim is "
+                     L"made here.", (int)devs.size(), micc, caps));
+    g_trace.line(fmt(L"modulation profiles offered: %d", (int)profile_ids.size()));
+    g_trace.line(L"no audio was opened and nothing was transmitted by this run: --ui-check is not a link "
+                 L"test and proves nothing about sound in air.");
+    ok_ui_check = (ctx.count >= 14);
+    g_trace.line(ok_ui_check ? L"step 3: ui-check PASSED (window, controls and inventory all produced)"
+                             : L"step 3: ui-check FAILED - fewer controls than the window defines");
+    g_trace.close();
   }
   bool ok_ui_check = false;
 };
@@ -444,23 +525,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       a->log = mk(hwnd, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 16,
                   442, 568, 128, a->mono, IDC_LOG);
 
-      // Devices, then profiles, then defaults - so a first run needs no typing.
-      std::string why;
-      int n = ni_audio_enumerate(&a->devs, &why);
-      SendMessageW(a->mic, CB_ADDSTRING, 0, (LPARAM)L"(system default)");
-      SendMessageW(a->spk, CB_ADDSTRING, 0, (LPARAM)L"(system default)");
-      if (n < 0) {
-        a->say(L"device enumeration said: " + w8(why));
-        a->say(L"this build sees no audio endpoints. That is a fact about the machine, not a bug in the "
-               L"listing: install or enable a device, then press Start.");
-      }
-      for (size_t i = 0; i < a->devs.size(); ++i) {
-        const AudioDeviceInfo& d = a->devs[i];
-        std::wstring line = fmt(L"%ls  %.0f Hz  %d ch  %hs", w8(d.name).c_str(), d.nominal_rate, d.channels,
-                                d.api.c_str());
-        if (d.loopback) line += L"   [loopback - cannot be used as a microphone]";
-        SendMessageW(d.is_capture ? a->mic : a->spk, CB_ADDSTRING, 0, (LPARAM)line.c_str());
-      }
+      // Profiles, an empty device list and the defaults, so the window is usable the moment it appears.
+      // The endpoints are read by load_devices() AFTER CreateWindowExW returns: a COM failure inside
+      // WM_CREATE would look like "the window could not be created", which is a lie about which thing broke.
+      a->populate_audio();
+      g_trace.line(L"step 1: window created and every control built");
       for (int i = 0; i < ni_profile_count(); ++i) {
         const Profile& p = ni_profile(i);
         a->profile_ids.push_back((int)p.id);
@@ -469,8 +538,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(a->prof, CB_ADDSTRING, 0, (LPARAM)line.c_str());
       }
       SendMessageW(a->prof, CB_SETCURSEL, 11, 0);   // FD-HIGH-DBPSK, the profile the verified 2 kB runs used
-      if (SendMessageW(a->mic, CB_GETCOUNT, 0, 0) > 0) SendMessageW(a->mic, CB_SETCURSEL, 0, 0);
-      if (SendMessageW(a->spk, CB_GETCOUNT, 0, 0) > 0) SendMessageW(a->spk, CB_SETCURSEL, 0, 0);
       SendMessageW(a->giver_radio, BM_SETCHECK, BST_CHECKED, 0);
       SendMessageW(a->proxy, BM_SETCHECK, BST_CHECKED, 0);
       SetTimer(hwnd, TIMER_REFRESH, 250, nullptr);
@@ -549,9 +616,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   bool ui_check = false;
   for (int i = 1; i < nargs; ++i)
     if (lstrcmpiW(args[i], L"--ui-check") == 0) ui_check = true;
+  // A windowed process has no stdout worth writing to, so the inventory goes into a file that the caller
+  // (and CI) can read. Nothing here calls printf: writing to a CRT stream that was never connected is how
+  // a GUI smoke test turns into an unexplained exit code instead of a report.
+  SetUnhandledExceptionFilter(crash_filter);
   if (ui_check) {
-    // CI has no console attached; give it one so the inventory is in the build log too.
-    if (!AttachConsole(ATTACH_PARENT_PROCESS)) AllocConsole();
+    g_trace_path = L"ui-check.txt";
+    g_trace.open(g_trace_path);
   }
   App app;
   g_app = &app;
@@ -571,11 +642,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                               r.right - r.left, r.bottom - r.top, nullptr, nullptr,
                               GetModuleHandleW(nullptr), nullptr);
   if (!hwnd) {
-    fprintf(stderr, "window creation failed: %lu\n", (unsigned long)GetLastError());
+    g_trace.line(fmt(L"window creation failed, GetLastError=%lu - no window, so no ui-check",
+                     (unsigned long)GetLastError()));
+    g_trace.close();
     return 3;
   }
   ShowWindow(hwnd, SW_SHOWNORMAL);
   UpdateWindow(hwnd);
+  // Endpoints only now that the window exists: see the comment inside WM_CREATE.
+  app.load_devices();
+  app.refresh();
   if (ui_check) {
     app.ui_check();
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -591,5 +667,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     TranslateMessage(&m);
     DispatchMessageW(&m);
   }
+  g_trace.close();
   return (ui_check && !app.ok_ui_check) ? 4 : 0;
 }

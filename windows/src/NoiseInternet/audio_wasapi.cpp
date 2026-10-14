@@ -1,7 +1,8 @@
 // audio_wasapi.cpp — WASAPI shared-mode render + capture, and device enumeration.
-// See audio_wasapi.h for the contract. NEVER COMPILED: no Windows toolchain was available where
-// this project was written; every API call below was written against the documented interface and
-// needs a real build + run on a machine with a speaker and a microphone.
+// See audio_wasapi.h for the contract. Compiled by CI with MSVC 19.51 on every push; it has still never
+// been run against a sound card, because no build host here has one. The unit tests do not reach it -
+// `ni audit` and the app's device lists are the only callers - which is why the crash described next went
+// unnoticed until CI ran the window.
 #include "ni/audio_wasapi.h"
 
 #include <windows.h>
@@ -65,11 +66,17 @@ bool looks_like_loopback(const std::string& name) {
 std::string friendly_name(IMMDevice* dev) {
   IPropertyStore* ps = nullptr;
   if (FAILED(dev->OpenPropertyStore(STGM_READ, &ps)) || !ps) return std::string();
-  PROPVARIANT pv;   // PROPVAR is a C++-only RAII helper in propidl.h; the plain variant is what
-                    // PropVariantInit/Clear take, and it needs no extra header on the SDK we target.
+  // PROPVAR is a C++-only RAII helper in propidl.h; the plain variant is what PropVariantClear takes and
+  // it needs no extra header. It must be zeroed first: the old code declared it uninitialised and called
+  // PropVariantClear() on it unconditionally, so a failing GetValue() meant Clear() interpreting a stack
+  // garbage vt - if that garbage looked like VT_LPWSTR or VT_BSTR it frees an arbitrary pointer, and the
+  // process dies with 0xC0000005 in code that never looked wrong. Zeroing makes Clear() a documented no-op
+  // for VT_EMPTY, which is why it is now unconditionally safe.
+  PROPVARIANT pv;
+  ZeroMemory(&pv, sizeof(pv));
   std::string out;
-  if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal)
-    out = utf8(pv.pwszVal);
+  HRESULT hr = ps->GetValue(PKEY_Device_FriendlyName, &pv);
+  if (SUCCEEDED(hr) && pv.vt == VT_LPWSTR && pv.pwszVal) out = utf8(pv.pwszVal);
   PropVariantClear(&pv);
   ps->Release();
   return out;
