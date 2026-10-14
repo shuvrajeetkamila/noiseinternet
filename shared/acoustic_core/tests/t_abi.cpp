@@ -138,6 +138,64 @@ int main() {
     NT_EQ(ni_abi_destroy(n), NI_OK);
   }
 
+  // ---- the capture analyzer, on buffers whose contents are known exactly: a rendered burst must be
+  // recognised as decodable (that is the strongest thing this project can say about an audio path), raw
+  // silence must be reported as silence rather than as a quiet room, and an off-band tone must be
+  // reported as shifted with a real ppm figure - these are the three verdicts the record button turns a
+  // user's recording into.
+  {
+    const int pid = 3;  // DBPSK-WIDE
+    std::vector<uint8_t> pl(64, 0x5A);
+    std::vector<float> tones(48000, 0.f);
+    int n = ni_abi_render(pid, 48000.0, 0.85, 7, &pl[0], (int)pl.size(), &tones[0], (int)tones.size());
+    NT_CHECK_MSG(n > 0, "render for the analyzer produced samples");
+    if (n > 0) {
+      char j[1024];
+      int rc = ni_abi_diagnose_pcm(&tones[0], n, 48000.0, pid, j, (int)sizeof j);
+      NT_CHECK_MSG(rc > 0, "diagnose_pcm writes a document");
+      std::string d = j;
+      NT_CHECK_MSG(d.find("\"decodes\": true") != std::string::npos,
+                   "a rendered burst must be diagnosed as decodable - that is the line that removes "
+                   "the speaker, the microphone and the room from the suspect list");
+      NT_CHECK_MSG(d.find("\"shift_ppm\": 0") != std::string::npos ||
+                       d.find("\"band_low_hz\": 1500") != std::string::npos,
+                   "and its measured band must be the profile's own band, not a shifted one");
+    }
+    std::vector<float> silence(48000, 0.f);
+    char j2[1024];
+    int rc2 = ni_abi_diagnose_pcm(&silence[0], (int)silence.size(), 48000.0, pid, j2, (int)sizeof j2);
+    NT_CHECK_MSG(rc2 > 0 && std::string(j2).find("NOTHING AT ALL") != std::string::npos,
+                 "digital silence must be reported as silence, not as a quiet room: they have "
+                 "different fixes");
+    // A resampling device, reproduced exactly: the same samples handed to the speaker at 44.1 kHz
+    // while everything downstream believes 48 kHz. Every tone lands 8.1 % lower, which is why such a
+    // burst is perfectly audible and never decodable. The analyzer has to name that, or the one
+    // failure mode that looks like the app working stays invisible.
+    std::vector<float> stretched;
+    {
+      const double ratio = 44100.0 / 48000.0;
+      size_t out_n = (size_t)((double)n / ratio);
+      stretched.resize(out_n);
+      for (size_t j = 0; j < out_n; ++j) {
+        double src = (double)j * ratio;
+        size_t i0 = (size_t)src;
+        double fr = src - (double)i0;
+        size_t i1 = i0 + 1 < (size_t)n ? i0 + 1 : i0;
+        stretched[j] = (float)((1.0 - fr) * tones[i0] + fr * tones[i1]);
+      }
+    }
+    char j3[1024];
+    int rc3 = ni_abi_diagnose_pcm(&stretched[0], (int)stretched.size(), 48000.0, pid, j3,
+                                 (int)sizeof j3);
+    std::string d3 = j3;
+    NT_CHECK_MSG(rc3 > 0 && d3.find("SHIFTED") != std::string::npos,
+                 "a burst that a resampling device played 8 % slow must be reported as SHIFTED - that "
+                 "is the one failure mode that is audible everywhere and decodable nowhere");
+    NT_CHECK_MSG(rc3 > 0 && d3.find("\"shift_ppm\": -8") != std::string::npos,
+                 "and the ppm figure must be the real one (-81 000 for 44.1 kHz played as 48 kHz), not "
+                 "an approximation");
+  }
+
   // ---- assist: the two behaviours that only exist for real rooms, checked for the contract the
   // panels depend on. Neither can be exercised against a sound card here; what can be checked is that
   // the sweep actually sweeps, because a level ladder that does not move is a feature that silently

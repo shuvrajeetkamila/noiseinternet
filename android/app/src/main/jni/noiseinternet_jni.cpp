@@ -257,4 +257,20 @@ JNIEXPORT jbyteArray JNICALL Java_com_noiseinternet_core_PhyTools_decodePcm(JNIE
   return r;
 }
 
+// The capture analyzer, on the phone. Same C++ the Windows record button runs, so the phone and the PC
+// cannot disagree about what a recording contains.
+JNIEXPORT jstring JNICALL Java_com_noiseinternet_core_PhyTools_diagnosePcm(JNIEnv* env, jobject,
+                                                                          jint profile, jdouble fs,
+                                                                          jfloatArray pcm) {
+  if (!pcm) return env->NewStringUTF("{\"error\":\"no buffer\"}");
+  jsize n = env->GetArrayLength(pcm);
+  jfloat* p = env->GetFloatArrayElements(pcm, nullptr);
+  std::vector<char> doc(4096);
+  int rc = ni_abi_diagnose_pcm((const float*)p, (int)n, (double)fs, (int)profile, &doc[0],
+                               (int)doc.size());
+  env->ReleaseFloatArrayElements(pcm, p, JNI_ABORT);
+  if (rc < 0) return env->NewStringUTF(ni_strerror(rc));
+  return env->NewStringUTF(&doc[0]);
+}
+
 }  // extern "C"

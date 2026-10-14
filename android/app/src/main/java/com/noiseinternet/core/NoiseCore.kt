@@ -328,6 +328,13 @@ object PhyTools {
         payload: ByteArray, out: FloatArray
     ): Int
 
+    /**
+     * What is in this recording, measured - the same analyzer the Windows "Record 8 s" button runs.
+     * Returns the core's JSON: levels, whether the profile's own band is where it should be, whether the
+     * modem can read a burst out of it, and one sentence saying what to do about it.
+     */
+    external fun diagnosePcm(profile: Int, fs: Double, pcm: FloatArray): String
+
     /** @param meta 2 doubles, filled with {measured SNR dB, peak amplitude}. */
     external fun decodePcm(
         profile: Int, fs: Double, sessionId: Int, pcm: FloatArray, meta: DoubleArray

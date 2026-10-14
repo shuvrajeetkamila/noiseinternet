@@ -22,6 +22,7 @@
 #include "ni/audio_io.h"
 #include "ni/audio_wasapi.h"
 #include "ni/node.h"
+#include "ni/capture_diagnosis.h"
 
 using namespace ni;
 
@@ -114,6 +115,33 @@ void run_command(App& app, const std::string& cmd) {
     }
     printf("best profile id %d, suggested mtu %d (model suggestion, not a room measurement)\n",
            rep.best_profile, rep.suggested_mtu);
+  } else if (cmd == "r") {
+    if (app.using_wav) {
+      printf("record: not with --wav-in (that mode feeds a file, it does not use a microphone)\n");
+    } else {
+      std::vector<float> cap;
+      std::vector<float> buf(2048);
+      int64_t until = (int64_t)GetTickCount64() + 8000;
+      while ((int64_t)GetTickCount64() < until) {
+        int got = app.audio.capture(&buf[0], (int)buf.size());
+        if (got > 0) cap.insert(cap.end(), buf.begin(), buf.begin() + got);
+        else Sleep(5);
+      }
+      double fs_now = app.audio.sample_rate();
+      if (cap.empty()) {
+        printf("record: the microphone delivered no samples in 8 s - that is the finding.\n");
+      } else {
+        ni::CaptureDiagnosis d;
+        ni::ni_diagnose_capture(&cap[0], cap.size(), fs_now, 10, &d);
+        if (ni_wav_write_f32("ni-last-capture.wav", &cap[0], cap.size(), fs_now, 16) == NI_OK)
+          printf("saved %zu samples to ni-last-capture.wav\n", cap.size());
+        printf("VERDICT: %s\n", d.verdict.c_str());
+        printf("  peak %.1f  room %.1f  loudest %.1f dBFS  clipped %.2f %%  band %.0f-%.0f Hz  "
+               "shift %.0f ppm  modem %s\n",
+               d.peak_dbfs, d.noise_dbfs, d.burst_dbfs, d.clip_pct, d.band_low_hz, d.band_high_hz,
+               d.shift_ppm, d.decodes ? "DECODES" : "no burst");
+      }
+    }
   } else if (cmd == "h") {
     // "hear myself": eight seconds of this machine listening to its own speaker. Detached, because the
     // pump has to keep running for the audio to move at all - and the answer is one sentence.
@@ -380,8 +408,8 @@ int main(int argc, char** argv) {
     });
   }
 
-  printf("commands: a=calibrate(model sweep)  h=hear myself  l=link test  i=internet test  "
-         "r=switch role  p=profiles  s=status json  q=quit\n");
+  printf("commands: a=calibrate(model sweep)  h=hear myself  r=record 8s+analyse  l=link test  "
+         "i=internet test  p=profiles  s=status json  q=quit\n");
   print_status(app);
   std::string line;
   while (!g_quit.load() && std::getline(std::cin, line)) {

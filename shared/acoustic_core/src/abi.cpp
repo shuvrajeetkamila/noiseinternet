@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "ni/abi.h"
+#include "ni/capture_diagnosis.h"
 #include "ni/audio_io.h"
 #include "ni/channel_sim.h"
 #include "ni/crypto.h"
@@ -339,6 +340,20 @@ int ni_abi_decode(int profile, double fs, uint16_t session_id, const float* pcm,
   return f.payload_len;
 }
 
+
+int ni_abi_diagnose_pcm(const float* pcm, int n, double fs, int profile_id, char* out_json,
+                        int out_cap) {
+  if (!pcm || n < 64 || !out_json || out_cap <= 0 || fs <= 0) return NI_ERR_PARAM;
+  CaptureDiagnosis d;
+  int rc = ni_diagnose_capture(pcm, (size_t)n, fs, profile_id, &d);
+  if (rc != NI_OK) return rc;
+  std::string j = d.to_json();
+  int len = (int)j.size();
+  if (len >= out_cap) len = out_cap - 1;
+  memcpy(out_json, j.data(), (size_t)len);
+  out_json[len] = 0;
+  return len;
+}
 const char* ni_abi_version(void) {
   static std::string v = std::string("noise-internet core 0.1, protocol v") +
                          std::to_string(NI_PROTO_VERSION) + ", " __DATE__;

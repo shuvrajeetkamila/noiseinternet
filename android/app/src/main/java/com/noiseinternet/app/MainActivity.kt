@@ -95,6 +95,23 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             renderStatus()
         }
         findViewById<Button>(R.id.calibrate).setOnClickListener { runAsync("calibrating") { it.calibrate() } }
+        // The one test that needs no second device: does THIS phone's speaker reach THIS phone's
+        // microphone, and is what it hears readable? The same analyzer the PC runs, so a recording that
+        // decodes here and not there is a fact about the room, not about the app.
+        findViewById<Button>(R.id.record_test).setOnClickListener {
+            val svc = NoiseService.get()
+            if (svc == null) {
+                results.text = "nothing is running: press Start first, because this records through the " +
+                    "same engine the link uses."
+                return@setOnClickListener
+            }
+            val pid = if (profileSpinner.selectedItemPosition in profiles.indices)
+                profiles[profileSpinner.selectedItemPosition].first else -1
+            results.text = "recording 8 seconds of what the microphone delivers, then analysing it..."
+            svc.recordAndAnalyse(8, 48000.0, if (pid > 0) pid else 10) { text ->
+                results.text = "WHAT THIS DEVICE HEARS\n\n" + text
+            }
+        }
         findViewById<Button>(R.id.link_test).setOnClickListener {
             runAsync("link test 228 B") { it.linkTest(228) }
         }
@@ -285,6 +302,7 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             if (explain.isNotBlank()) {
                 append("\n\nWHAT TO DO: ").append(explain).append("\n")
             }
+            append("\nPAIRED: ").append(if (st.pairing == "paired") "YES" else "NOT PAIRED")
             append("\npeer ").append(if (st.peerOnline) "online" else "offline")
             append("  pairing ").append(st.pairing)
             append("\nmatch code: ").append(st.sas.ifBlank { "(not paired yet)" })

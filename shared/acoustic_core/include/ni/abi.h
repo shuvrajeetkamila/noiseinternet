@@ -51,6 +51,12 @@ int ni_abi_render(int profile, double fs, double amplitude, uint16_t session_id,
 // Decode captured samples; writes recovered payload, returns byte count or negative error.
 int ni_abi_decode(int profile, double fs, uint16_t session_id, const float* pcm, int n,
                   uint8_t* out, int out_cap, double* snr_out, double* peak_out);
+
+// Analyze a captured buffer and write a one-sentence verdict plus the measurements, as JSON.
+// Same code path as the Windows "Record 8 s" button and `ni analyze`: the phone and the PC must
+// not be able to disagree about what a recording contains.
+int ni_abi_diagnose_pcm(const float* pcm, int n, double fs, int profile_id, char* out_json,
+                        int out_cap);
 const char* ni_abi_version(void);
 const char* ni_abi_profiles_json(void);
 int ni_abi_audio_enumerate(char* out_json, int cap);  // NI_ERR_UNSUPPORTED without hardware

@@ -92,6 +92,12 @@ class AudioEngine(
     @Volatile private var capCursor = 0
     @Volatile private var capCycles = 0
     @Volatile private var capCombo = "not open"
+    // Where a requested recording goes, and how much of it is still wanted. Set from the UI thread,
+    // written by the capture thread: one producer, one consumer, no lock needed for a float buffer that
+    // the UI only reads after the capture thread has finished filling it.
+    @Volatile private var dump: FloatArray? = null
+    @Volatile private var dumpHave = 0
+    @Volatile private var dumpWant = 0
     // The microphone the user picked, remembered for every (re)open - the recorder is created by the
     // capture thread now, so start() can no longer attach the preference to an object it owns.
     @Volatile private var prefInput: AudioDeviceInfo? = null
@@ -308,6 +314,14 @@ class AudioEngine(
             if (n > 0) {
                 fails = 0
                 sink.onCapture(inBuf, n)
+                // A requested recording gets exactly what the engine got, before anything else looks at
+                // it: the point of the recording is to see the microphone's output, not the engine's.
+                val d = dump
+                if (d != null && dumpHave < dumpWant) {
+                    val take = minOf(n, dumpWant - dumpHave)
+                    System.arraycopy(inBuf, 0, d, dumpHave, take)
+                    dumpHave += take
+                }
             } else {
                 fails++
                 capReadFailures++
@@ -357,6 +371,31 @@ class AudioEngine(
                 try { Thread.sleep(800) } catch (e: InterruptedException) { }
             }
         }
+    }
+
+    /**
+     * Record [seconds] of whatever the microphone delivers into [into] (allocated here), and return the
+     * number of samples actually captured. Polling-free: the caller waits for this to stop growing, or
+     * simply sleeps for the duration.
+     */
+    fun startRecording(seconds: Int, fs: Double) {
+        val want = (fs * seconds).toInt()
+        val buf = FloatArray(want)
+        dumpHave = 0
+        dumpWant = want
+        dump = buf
+    }
+
+    fun recordingDone(): Boolean = dump != null && dumpHave >= dumpWant
+    fun recordingSamples(): Int = dumpHave
+    /** Hand back what was recorded and stop recording. Null when nothing was requested. */
+    fun takeRecording(): FloatArray? {
+        val d = dump ?: return null
+        dump = null
+        val have = dumpHave
+        dumpHave = 0
+        dumpWant = 0
+        return if (have <= 0) FloatArray(0) else d.copyOf(have)
     }
 
     /** The capture sources this platform will accept, most processed-avoiding first. */

@@ -39,6 +39,8 @@
 #include "ni/crypto.h"
 #include "ni/node.h"
 
+#include "ni/capture_diagnosis.h"
+
 using namespace ni;
 
 namespace {
@@ -321,6 +323,53 @@ int cmd_render(const Opts& o) {
   printf("  play it next to the receiving device, then:\n    ni decode --in <recording.wav> "
          "--profile %s --expect-sha256 %s\n",
          ni_profile(pid).name, sha_hex(pl.data(), pl.size()).c_str());
+  return 0;
+}
+
+int cmd_analyze(const Opts& o) {
+  bool badp = false;
+  int pid = profile_arg(o, 10, &badp);
+  if (badp) return bad_profile(o);
+  std::string in = o.get("in", "recording.wav");
+  double fs_file = 0;
+  std::vector<float> x;
+  int ch = 0, bits = 0;
+  int rc = ni_wav_read_f32(in, &x, &fs_file, &ch, &bits);
+  if (rc < 0) {
+    fprintf(stderr, "cannot read %s: %s\n", in.c_str(), ni_strerror(rc));
+    return 1;
+  }
+  printf("analyze: %s - %zu samples @ %.0f Hz (%d ch, %d bit)\n", in.c_str(), x.size(), fs_file, ch,
+         bits);
+  CaptureDiagnosis d;
+  rc = ni_diagnose_capture(&x[0], x.size(), fs_file, pid, &d);
+  if (rc != NI_OK) {
+    fprintf(stderr, "analyze failed: %s\n", ni_strerror(rc));
+    return 1;
+  }
+  printf("  peak %.1f dBFS   rms %.1f dBFS   room %.1f dBFS   loudest %.1f dBFS   span %.1f dB\n",
+         d.peak_dbfs, d.rms_dbfs, d.noise_dbfs, d.burst_dbfs, d.span_db);
+  printf("  clipped %.2f %%   signal present %.0f %% of the time   band %.0f-%.0f Hz (%s expects "
+         "%.0f-%.0f, shift %.0f ppm)\n",
+         d.clip_pct, d.duty_pct, d.band_low_hz, d.band_high_hz, ni_profile(pid).name,
+         ni_profile(pid).f_low, ni_profile(pid).f_high, d.shift_ppm);
+  printf("  modem: %s\n", d.decodes ? "DECODES at this profile" : "cannot read a burst at this profile");
+  fflush(stdout);
+  printf("\n  VERDICT: %s\n", d.verdict.c_str());
+  std::string out = o.get("json");
+  if (!out.empty()) {
+    FILE* f = fopen(out.c_str(), "wb");
+    if (!f) {
+      fprintf(stderr, "cannot write %s\n", out.c_str());
+      return 1;
+    }
+    std::string j = std::string("{\"generator\": \"ni analyze\", \"in\": \"") + in +
+                    "\", \"profile\": \"" + ni_profile(pid).name + "\", \"diagnosis\": " +
+                    d.to_json() + "}\n";
+    fwrite(j.data(), 1, j.size(), f);
+    fclose(f);
+    printf("  wrote %s\n", out.c_str());
+  }
   return 0;
 }
 
@@ -1314,6 +1363,7 @@ int usage() {
       "  ni profiles [--json] [--fs N]      profiles and their computed per-frame limits\n"
       "  ni plan --profile P --bytes N        airtime / bit-rate plan for one frame\n"
       "  ni render --out burst.wav            write an audible burst carrying a payload\n"
+      "  ni analyze --in recording.wav        what is in a recording, and what to do about it\n"
       "        --text \"...\" | --file f | --random N   [--profile --fs --session --amplitude "
       "--pad --bits]\n"
       "  ni decode --in rec.wav               recover a payload from a recording\n"
@@ -1345,6 +1395,7 @@ int main(int argc, char** argv) {
   if (cmd == "plan") return cmd_plan(o);
   if (cmd == "render") return cmd_render(o);
   if (cmd == "decode") return cmd_decode(o);
+  if (cmd == "analyze") return cmd_analyze(o);
   if (cmd == "selftest") return cmd_selftest(o);
   if (cmd == "calibrate") return cmd_calibrate(o);
   if (cmd == "bench") return cmd_bench(o);

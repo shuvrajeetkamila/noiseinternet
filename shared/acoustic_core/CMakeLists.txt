@@ -34,6 +34,7 @@ set(NI_SOURCES
   src/session.cpp
   src/arq.cpp
   src/wav.cpp
+  src/capture_diagnosis.cpp
   src/proxy.cpp
   src/node.cpp
   src/sim.cpp

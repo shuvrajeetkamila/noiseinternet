@@ -281,6 +281,19 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    numbers came from the room (they never did - defect 53), and a passphrase mismatch is stated as a fact
    instead of leaving `failed` unexplained. What is still missing is the same thing as before: a burst
    crossing real air.
+
+   **Defects 57-59**, from the third report (`reports/RESULTS.md` §4.75): the product could not say what a
+   microphone had actually recorded, which is why three field reports in a row ended at "bursts counted,
+   nothing decoded". There is now one analyzer, called by all three front ends: `ni analyze --in file.wav`,
+   the Windows button **"Record 8 s and analyse what the microphone hears"** (writes `ni-last-capture.wav`
+   next to the program and prints a sentence), and the phone's **"Test this device (8 s)"**. Its verdicts
+   are: digital silence / **this recording decodes** / far too quiet / clipped / **the sound is shifted, by
+   N ppm** / no separation / heard-but-not-readable. t_abi pins all of them, including a reproduction of a
+   44.1 kHz device played as 48 kHz (which shifts every tone 8.1 % - audible to nobody, fatal to the
+   decoder). One measurement from the third report is still open and is now defect 59: a device decoding
+   its *own* transmissions counts them as frames from the peer, which is why the phone read `peer online`
+   and `decoded 48` with zero bytes received. The fix (hash this end's own transmitted bursts and count the
+   echo separately) is next, not in this build.
 1. **Gate C, remaining half.** Pairing under loss (defect 26) is the cheapest hard thing left: the counters already say the giver's bursts never arrive, so start from the sim's loss injection, not from the handshake.
    Next, the 82-byte-profile 2 kB run and multipath, which now each succeed 1 trial in 3 - a retry budget that gives up (defect 22) is plausibly all that separates them. A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver

@@ -119,6 +119,9 @@
             <Button android:id="@+id/calibrate" android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="Calibrate" />
 
+            <Button android:id="@+id/record_test" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Test this device (8 s)" />
+
             <Button android:id="@+id/link_test" android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="Link test" />
 

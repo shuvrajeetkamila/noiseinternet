@@ -32,6 +32,7 @@
 #include "ni/audio_wasapi.h"
 #include "ni/common.h"
 #include "ni/node.h"
+#include "ni/capture_diagnosis.h"
 
 using namespace ni;
 
@@ -40,6 +41,7 @@ namespace {
 enum {
   IDC_GIVER = 1000, IDC_RECEIVER, IDC_MIC, IDC_SPK, IDC_PROFILE, IDC_SESSION, IDC_SECRET,
   IDC_MATCH, IDC_DUPLEX, IDC_PROXY, IDC_START, IDC_STOP, IDC_SWITCH, IDC_CAL, IDC_LINK, IDC_NET,
+  IDC_REC,
   IDC_STATUS, IDC_LOG, TIMER_REFRESH = 1
 };
 
@@ -295,7 +297,70 @@ struct App {
         out = L"nothing is running: press Start first.";
       } else {
         int64_t now = (int64_t)GetTickCount64();
-        if (which == IDC_CAL) {
+        if (which == IDC_REC) {
+          // Eight seconds of exactly what the audio backend handed the engine, written to a WAV next to
+          // the program and analysed with the same code the phone runs. Both a measurement and a file the
+          // user can keep, because "what did it hear" is not answerable from a level meter.
+          std::vector<float> cap;
+          int fs_now = 0;
+          {
+            std::lock_guard<std::mutex> g(mu);
+            if (!audio || !running.load()) {
+              say(L"press Start first: the recorder is the same one the link uses, and it has to be open.");
+              busy.store(false);
+              return;
+            }
+            fs_now = (int)audio->sample_rate();
+          }
+          std::vector<float> buf(2048);
+          const int64_t until = (int64_t)GetTickCount64() + 8000;
+          while ((int64_t)GetTickCount64() < until) {
+            int got = 0;
+            {
+              std::lock_guard<std::mutex> g(mu);
+              if (!audio || !running.load() || quitting.load()) break;
+              got = audio->capture(&buf[0], (int)buf.size());
+            }
+            if (got > 0) cap.insert(cap.end(), buf.begin(), buf.begin() + got);
+            else Sleep(5);
+          }
+          if (cap.size() < 4800) {
+            say(fmt(L"the microphone delivered only %zu samples in 8 s - that is the finding, not a "
+                    L"failure of the recording.", cap.size()));
+          }
+          int pid = 10;
+          {
+            std::lock_guard<std::mutex> g(mu);
+            int pi = (int)SendMessageW(prof, CB_GETCURSEL, 0, 0);
+            if (pi >= 0 && pi < (int)profile_ids.size()) pid = profile_ids[(size_t)pi];
+          }
+          CaptureDiagnosis d;
+          if (!cap.empty() && ni_diagnose_capture(&cap[0], cap.size(), (double)fs_now, pid, &d) == NI_OK) {
+            HANDLE h = CreateFileW(L"ni-last-capture.wav", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            std::wstring where = L"(could not be written)";
+            if (h != INVALID_HANDLE_VALUE) {
+              CloseHandle(h);
+              if (ni_wav_write_f32("ni-last-capture.wav", &cap[0], cap.size(), (double)fs_now, 16) ==
+                  NI_OK) {
+                wchar_t full[MAX_PATH];
+                DWORD n2 = GetFullPathNameW(L"ni-last-capture.wav", MAX_PATH, full, nullptr);
+                if (n2 > 0 && n2 < MAX_PATH) where = full;
+              }
+            }
+            out = w8(d.verdict);
+            out += fmt(L"\r\n\r\npeak %.1f dBFS   room %.1f dBFS   loudest %.1f dBFS   clipped %.2f %%"
+                       L"\r\nband %.0f-%.0f Hz   shift %.0f ppm   modem %ls",
+                       d.peak_dbfs, d.noise_dbfs, d.burst_dbfs, d.clip_pct, d.band_low_hz,
+                       d.band_high_hz, d.shift_ppm,
+                       d.decodes ? L"DECODES this recording" : L"cannot read a burst in it");
+            out += fmt(L"\r\nnot a guess: %zu samples at %d Hz were analysed. Saved as %ls", cap.size(),
+                       fs_now, where.c_str());
+          } else {
+            out = L"nothing was recorded: the microphone handed the engine no samples at all in eight "
+                  L"seconds, which is itself the answer (see the audio line in the status panel).";
+          }
+        } else if (which == IDC_CAL) {
           Calibrator::Report rep;
           int rc = node->calibrate(now, &rep);
           if (rc != NI_OK) {
@@ -623,6 +688,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       mk(hwnd, L"BUTTON", L"Calibrate", BS_PUSHBUTTON, 286, 214, 90, 26, a->font, IDC_CAL);
       mk(hwnd, L"BUTTON", L"Link test", BS_PUSHBUTTON, 382, 214, 86, 26, a->font, IDC_LINK);
       mk(hwnd, L"BUTTON", L"Internet test", BS_PUSHBUTTON, 474, 214, 110, 26, a->font, IDC_NET);
+      // The one button that answers "what is my microphone actually recording?" - the question that
+      // three field reports could not answer, and the only one that needs no second device.
+      mk(hwnd, L"BUTTON", L"Record 8 s and analyse what the microphone hears", BS_PUSHBUTTON, 16, 240,
+         568, 24, a->font, IDC_REC);
       mk(hwnd, L"STATIC", L"measured status", 0, 16, 248, 200, 16, a->font, 0);
       a->status = mk(hwnd, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER,
                      16, 266, 568, 150, a->mono, IDC_STATUS);
@@ -674,6 +743,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
           SendMessageW(next == NI_ROLE_GIVER ? a->giver_radio : a->receiver_radio, BM_SETCHECK, BST_CHECKED, 0);
           break;
         }
+        case IDC_REC:
         case IDC_CAL:
         case IDC_LINK:
         case IDC_NET: {

@@ -307,6 +307,49 @@ class NoiseService : VpnService(), AudioEngine.Sink {
 
     fun audioDescription(): String = audio?.describe() ?: "audio engine not started"
 
+    /**
+     * Record [seconds] of microphone audio and analyse it with the core's analyzer. Runs off the UI
+     * thread; the listener gets one sentence plus the measurements. Null engine means nothing was
+     * started, which is reported rather than worked around.
+     */
+    fun recordAndAnalyse(seconds: Int, fs: Double, profile: Int, done: (String) -> Unit) {
+        val a = audio
+        if (a == null) {
+            done("nothing is running: press Start first, because this records through the same engine the link uses.")
+            return
+        }
+        Thread {
+            a.startRecording(seconds, fs)
+            val deadline = System.currentTimeMillis() + (seconds * 1000L + 4000)
+            while (!a.recordingDone() && System.currentTimeMillis() < deadline) Thread.sleep(50)
+            val pcm = a.takeRecording()
+            val got = pcm?.size ?: 0
+            val doc = if (got > 0) {
+                try {
+                    PhyTools.diagnosePcm(profile, fs, pcm!!)
+                } catch (e: Exception) {
+                    "the analyzer failed: ${e.message}"
+                }
+            } else {
+                "the microphone delivered no samples at all in $seconds seconds - that is the finding."
+            }
+            var text = doc
+            try {
+                val o = org.json.JSONObject(doc)
+                text = o.optString("verdict", doc) +
+                    String.format("\npeak %.1f  room %.1f  loudest %.1f dBFS", o.optDouble("peak_dbfs", 0.0),
+                        o.optDouble("noise_dbfs", 0.0), o.optDouble("burst_dbfs", 0.0)) +
+                    String.format("\nclipped %.2f %%  band %.0f-%.0f Hz  shift %.0f ppm  modem %s",
+                        o.optDouble("clip_pct", 0.0), o.optDouble("band_low_hz", 0.0),
+                        o.optDouble("band_high_hz", 0.0), o.optDouble("shift_ppm", 0.0),
+                        if (o.optBoolean("decodes", false)) "DECODES this recording" else "cannot read a burst")
+            } catch (e: Exception) {
+                // not JSON: show it as it came
+            }
+            handler.post { done(text + "\n(" + got + " samples analysed at " + fs.toInt() + " Hz)") }
+        }.start()
+    }
+
     fun routeWarning(): String? {
         val a = audio ?: return "audio engine not started"
         return if (a.acousticRouteOk()) null
