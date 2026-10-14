@@ -167,10 +167,18 @@ class NoiseCore(config: Config) {
 
                 fun d(k: String): Double? = if (o.isNull(k)) null else o.optDouble(k)
                 fun l(k: String): Long? = if (o.isNull(k)) null else o.optLong(k)
+                // Field names are asserted against the core's own writer (StatusSnapshot::to_json in
+                // node.cpp). Four of them used to disagree with it - profile_name/useful_bps_up/
+                // useful_bps_down/retries against profile/useful_up_bps/useful_down_bps/retransmits -
+                // so those lines read "-" for ever, and the blank "profile -" is exactly what hid a
+                // phone-on-a-different-profile from the first field test. Each one now takes the core's
+                // name first and the old spelling as a fallback.
+                fun s2(a: String, b: String, dflt: String = "-"): String =
+                    if (o.has(a) && !o.isNull(a)) o.optString(a, dflt) else o.optString(b, dflt)
                 return Status(
                     state = o.optString("state_name", o.optString("state", "-")),
                     role = o.optString("role", "-"),
-                    profile = o.optString("profile_name", "-"),
+                    profile = s2("profile", "profile_name"),
                     sampleRate = d("sample_rate"),
                     peerOnline = o.optBoolean("peer_online", false),
                     snrDb = d("snr_db"),
@@ -179,11 +187,11 @@ class NoiseCore(config: Config) {
                     evecPct = d("evec_pct"),
                     rttMs = d("rtt_ms"),
                     lossPct = d("loss_pct"),
-                    usefulBpsUp = d("useful_bps_up"),
-                    usefulBpsDown = d("useful_bps_down"),
+                    usefulBpsUp = d("useful_up_bps") ?: d("useful_bps_up"),
+                    usefulBpsDown = d("useful_down_bps") ?: d("useful_bps_down"),
                     framesSent = l("frames_sent"),
                     framesReceived = l("frames_received"),
-                    retries = l("retries"),
+                    retries = l("retransmits") ?: l("retries"),
                     crcFail = l("crc_fail"),
                     bytesSent = l("bytes_sent"),
                     bytesReceived = l("bytes_received"),
@@ -218,6 +226,17 @@ class NoiseCore(config: Config) {
                 "bursts are arriving (sync found $syncHits times) but none of them decodes: the two " +
                     "ends are most likely on different profiles or session ids, or the level is wrong. " +
                     "Set the SAME profile number and session id on both ends."
+            // -120 is what the engine reports when it has never received a single sample, which is a
+            // broken capture path (a refused format, a held microphone), not a quiet room: the first
+            // field test showed -120 on the phone and a normal -20..-50 dBFS on the PC, and the panel
+            // said "the microphone hears almost nothing" for both. Distinct sentences, because they
+            // have distinct fixes.
+            (inDbfs ?: -120.0) <= -119.5 ->
+                "no audio has reached the engine at all (the level has never moved off -120 dBFS): " +
+                    "the microphone path is failing, not the room. The audio line below names the " +
+                    "capture format and how many reads failed - a device that refuses 32-bit float " +
+                    "capture now falls back to 16-bit PCM by itself, so if it still reads -120 the " +
+                    "microphone is held by another app or the format list needs another fallback."
             (inDbfs ?: -120.0) < -70.0 ->
                 "the microphone hears almost nothing (${f(inDbfs)} dBFS): check the microphone, the " +
                     "phone's volume, the distance, and that nothing is muting the speaker."

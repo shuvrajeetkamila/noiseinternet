@@ -1037,10 +1037,14 @@ int cmd_demo(const Opts& o) {
   printf("  origin     : %s\n",
          origin_kind == "local"
              ? "a plain-HTTP server started by this command on this host (deterministic document).\n"
-               "               This proves the RELAY PATH byte for byte - curl -> receiver proxy ->\n"
-               "               acoustic link -> giver fetch -> origin and back. It does NOT prove\n"
-               "               internet access: the origin is on this host. Pass --url to try a real\n"
-               "               URL, which needs a plain-HTTP origin (see packaging/NOTES-url.md)."
+               "               The REQUEST leg (client -> receiver proxy -> acoustic link -> giver\n"
+               "               fetch -> origin) is verified end to end. The RESPONSE leg does not\n"
+               "               complete yet (defect 41 in reports/RESULTS.md): the document burst is\n"
+               "               pushed, the receiver reports rx_malformed, so the verdict below cannot\n"
+               "               read IDENTICAL until that is fixed. This does NOT prove internet access:\n"
+               "               the origin is on this host. Pass --url for a real one - and if that URL\n"
+               "               is dynamic, use a deterministic one for the byte check.\n"
+               "               URL, whose origin must speak plain HTTP (see packaging/windows/README-RUN.md)."
              : "the URL above, on whatever host it resolves to");
   printf("  evidence   : the ONLY path between the two nodes is 16-bit PCM produced by\n"
          "               tx_render and shaped by AcousticChannel. No socket, pipe or shared\n"

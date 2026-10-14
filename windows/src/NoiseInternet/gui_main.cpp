@@ -154,6 +154,7 @@ struct App {
   std::vector<std::wstring> pending;              // log lines to flush into the edit
   std::mutex pending_mu;
   std::wstring last_match;                        // so a changed match code gets logged once
+  unsigned cfg_proxy_port_ = 8471;                // the port this session's proxy was started on
 
   // Log lines are produced on any thread and applied on the UI thread, which is the only way to keep a
   // 45-second link test from freezing the window.
@@ -366,6 +367,7 @@ struct App {
                                 (SendMessageW(proxy, BM_GETCHECK, 0, 0) == BST_CHECKED);
     cfg.enable_giver_fetch = (cfg.role == NI_ROLE_GIVER);
     cfg.proxy_port = 8471;
+    cfg_proxy_port_ = (unsigned)cfg.proxy_port;
     if (cfg.pairing_secret.size() < 8)
       say(L"warning: a short passphrase is weak - the core prints the entropy it actually got.");
 
@@ -455,6 +457,16 @@ struct App {
     t += fmt(L"bytes sent %llu  received %llu\r\n", (unsigned long long)s.bytes_sent,
              (unsigned long long)s.bytes_received);
     t += fmt(L"tunnel %hs: %hs\r\n", s.tunnel_up ? "up" : "down", s.tunnel_detail.c_str());
+    // The proxy refuses every client that does not present its bearer token, and the session's token
+    // only exists once the node is running - so the window has to show it, or nobody could point a
+    // browser at this proxy. (The console build can set one with --proxy-token; the window generated it
+    // and, until this line, never told anyone what it was. Defect 27 for the Android side.)
+    if (node && s.tunnel_up && !node->proxy_token().empty()) {
+      t += fmt(L"proxy 127.0.0.1:%u  token %hs\r\n", (unsigned)cfg_proxy_port_,
+               node->proxy_token().c_str());
+      t += L"  anything that wants to use this proxy needs that token "
+           L"(Proxy-Authorization: Noise <token>).\r\n";
+    }
     t += fmt(L"internet %hs: %hs\r\n", s.internet_ok ? "verified" : "not verified", s.internet_detail.c_str());
     // The one-line answer to "why isn't it pairing", from the engine's own counters. Every branch
     // names the number it is based on, and when the numbers are fine it says so instead of guessing.
@@ -467,6 +479,11 @@ struct App {
       t += L"bursts are arriving (sync found, nothing readable): the two ends are most likely on "
            L"different profiles or session ids, or the level is wrong. Set the SAME profile number, "
            L"session id and passphrase on both ends.";
+    else if (s.in_dbfs <= -119.5)
+      t += L"no audio has reached the engine at all (the level has never moved off -120 dBFS): this is "
+           L"the capture path failing, not a quiet room. Open the audio line below - it names the "
+           L"format and the device. A microphone that another program holds, or is disabled in "
+           L"Windows privacy settings, reads exactly like this.";
     else if (s.in_dbfs < -70.0)
       t += fmt(L"the microphone hears almost nothing (%.1f dBFS): check which microphone is selected, "
                L"the other device's volume, and the distance.", s.in_dbfs);

@@ -429,36 +429,60 @@ int WasapiEngine::render(const float* mono, int frames, int timeout_ms) {
 int WasapiEngine::capture(float* mono, int frames) {
   if (!p_ || !p_->capture.cc || frames <= 0) return 0;
   Impl::Side& s = p_->capture;
-  UINT got = 0;
-  HRESULT hr = s.cc->GetNextPacketSize(&got);
-  if (FAILED(hr)) {
-    err_ = "GetNextPacketSize failed";
-    return NI_ERR_IO;
+  int out = 0;
+  // Whatever a previous call could not fit stays here instead of being thrown away. The old version
+  // read exactly ONE device packet per call and released the whole packet even when the caller's
+  // buffer was smaller, so every sample past the end of that buffer was dropped - silently, and in the
+  // middle of the bursts the peer is trying to decode. (With a 2048-frame caller buffer and the usual
+  // 480-960 frame packets it rarely triggered; on a device that hands over larger packets it would
+  // corrupt every burst.) Now: drain the hold-over first, then keep reading packets while there is
+  // room, keeping the remainder for the next call.
+  while (out < frames && (int)cap_hold_.size() > cap_hold_off_) {
+    mono[out++] = cap_hold_[(size_t)cap_hold_off_++];
   }
-  if (got == 0) return 0;
-  float* data = nullptr;
-  UINT n = 0;
-  DWORD flags = 0;
-  hr = s.cc->GetBuffer(reinterpret_cast<BYTE**>(&data), &n, &flags, nullptr, nullptr);
-  if (FAILED(hr) || !data) {
-    err_ = "IAudioCaptureClient::GetBuffer failed";
-    return NI_ERR_IO;
+  if (cap_hold_off_ >= (int)cap_hold_.size()) {
+    cap_hold_.clear();
+    cap_hold_off_ = 0;
   }
-  capture_silent_ = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-  int limit = (int)n < frames ? (int)n : frames;
-  if (capture_silent_) {
-    for (int i = 0; i < limit; ++i) mono[i] = 0.f;
-  } else if (s.ch == 1) {
-    memcpy(mono, data, sizeof(float) * limit);
-  } else {
-    for (int i = 0; i < limit; ++i) {
-      float acc = 0.f;
-      for (int c = 0; c < s.ch; ++c) acc += data[i * s.ch + c];
-      mono[i] = acc / (float)s.ch;  // downmix; the modem works on one channel
+  for (;;) {
+    UINT got = 0;
+    HRESULT hr = s.cc->GetNextPacketSize(&got);
+    if (FAILED(hr)) {
+      err_ = "GetNextPacketSize failed";
+      return out ? out : NI_ERR_IO;
     }
+    if (got == 0) return out;
+    float* data = nullptr;
+    UINT n = 0;
+    DWORD flags = 0;
+    hr = s.cc->GetBuffer(reinterpret_cast<BYTE**>(&data), &n, &flags, nullptr, nullptr);
+    if (FAILED(hr) || !data) {
+      err_ = "IAudioCaptureClient::GetBuffer failed";
+      return out ? out : NI_ERR_IO;
+    }
+    capture_silent_ = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+    bool any = false;
+    for (UINT i = 0; i < n; ++i) {
+      float v = 0.f;
+      if (!capture_silent_) {
+        if (s.ch == 1) {
+          v = data[i];
+        } else {
+          float acc = 0.f;
+          for (int c = 0; c < s.ch; ++c) acc += data[i * (UINT)s.ch + (UINT)c];
+          v = acc / (float)s.ch;   // downmix; the modem works on one channel
+        }
+      }
+      if (out < frames) {
+        mono[out++] = v;
+      } else {
+        cap_hold_.push_back(v);    // keep it for the next call - never drop a sample
+        any = true;
+      }
+    }
+    s.cc->ReleaseBuffer(n);
+    if (!any && out >= frames) return out;
   }
-  s.cc->ReleaseBuffer(n);
-  return limit;
 }
 
 std::string WasapiEngine::describe() const {

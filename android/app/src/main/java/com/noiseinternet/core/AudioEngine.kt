@@ -66,6 +66,29 @@ class AudioEngine(
 
     private var rec: AudioRecord? = null
     private var track: AudioTrack? = null
+    // Which capture format is actually delivering. The first field test failed here: the phone accepted
+    // a 32-bit-float UNPROCESSED AudioRecord, reported the right route, and then returned -2
+    // (ERROR_BAD_VALUE) from every single read() - so the engine never received one sample, the phone
+    // was deaf, and the only trace was a raw "-2" in a log line while the panel showed a level of -120.
+    // The capture path now retries, falls back to 16-bit PCM (which every device supports) and keeps
+    // playback running whatever happens on the input side.
+    @Volatile
+    private var capEncoding = AudioFormat.ENCODING_PCM_FLOAT
+    @Volatile
+    private var capReadFailures = 0
+    @Volatile
+    private var capRebuilds = 0
+    @Volatile
+    private var capFrames = 0
+
+    // Set by the capture thread: `capOpen` once a recorder is really recording, `capDead` once every
+    // source/encoding combination on the device has been refused. start() waits briefly on these so a
+    // phone whose microphone cannot be opened says so immediately instead of running a deaf engine.
+    @Volatile private var capOpen = false
+    @Volatile private var capDead = false
+    // The microphone the user picked, remembered for every (re)open - the recorder is created by the
+    // capture thread now, so start() can no longer attach the preference to an object it owns.
+    @Volatile private var prefInput: AudioDeviceInfo? = null
     // Frames this class has handed to the AudioTrack. `AudioTrack.getFramesWritten()` is a hidden API
     // (the Kotlin build failed on it: "Unresolved reference"), so the count is kept here from write()'s
     // own return value, which is public and exact.
@@ -90,55 +113,28 @@ class AudioEngine(
     /** Requires RECORD_AUDIO, granted by the activity before this is called. */
     fun start(input: AudioDeviceInfo?, output: AudioDeviceInfo?): Boolean {
         if (running.get()) return true
-        val minIn = AudioRecord.getMinBufferSize(
+        // Capture is asked for in 16-bit first for the *requirement check*, because 16-bit is what
+        // every Android device is guaranteed to support and the capture loop converts it to float
+        // itself. Float is still preferred at open time - it skips one quantiser - but a device that
+        // refuses float capture is no longer a device that cannot run this app, which is what the old
+        // check said.
+        var minIn = AudioRecord.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minIn <= 0) minIn = AudioRecord.getMinBufferSize(
             sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT
         )
         val minOut = AudioTrack.getMinBufferSize(
             sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT
         )
-        if (minIn < 0 || minOut < 0) {
-            lastError = "device refuses 32-bit float mono PCM at $sampleRate Hz " +
-                "(minIn=$minIn minOut=$minOut) - the modem needs float to avoid a second quantiser"
+        if (minIn <= 0 || minOut <= 0) {
+            lastError = "this device refuses mono PCM capture/playback at $sampleRate Hz " +
+                "(minIn=$minIn minOut=$minOut)"
             return false
         }
         val frames = maxOf(minIn, minOut, sampleRate / 50)  // >= 20 ms per callback
 
-        var rec0: AudioRecord? = null
-        var chosen = -1
-        // API 31 renamed the constant; both spellings are tried, oldest-first fallback chain.
-        val candidates = ArrayList<Pair<Int, String>>()
-        if (Build.VERSION.SDK_INT >= 24) {
-            candidates.add(
-                MediaRecorder.AudioSource.UNPROCESSED to "UNPROCESSED"
-            )
-        }
-        candidates.add(MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION")
-        candidates.add(MediaRecorder.AudioSource.MIC to "MIC")
-        for ((src, name) in candidates) {
-            try {
-                val r = AudioRecord(
-                    src, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT,
-                    frames * 4
-                )
-                if (r.state == AudioRecord.STATE_INITIALIZED) {
-                    rec0 = r
-                    chosen = src
-                    inputSourceName.set(src)
-                    break
-                }
-                r.release()
-            } catch (e: Exception) {
-                lastError = "AudioRecord($name) failed: ${e.message}"
-            }
-        }
-        val r = rec0 ?: run {
-            if (lastError.isEmpty()) lastError = "no usable AudioRecord source"
-            return false
-        }
         var preferredIgnored = false
-        input?.let {
-            if (Build.VERSION.SDK_INT >= 23) preferredIgnored = !r.setPreferredDevice(it)
-        }
 
         val t = AudioTrack.Builder()
             .setAudioAttributes(
@@ -162,10 +158,13 @@ class AudioEngine(
             .build()
         output?.let { if (Build.VERSION.SDK_INT >= 23 && !t.setPreferredDevice(it)) preferredIgnored = true }
 
-        rec = r
+        // One recorder, owned by the capture thread. This used to open a float recorder here, pick a
+        // source here, and then captureLoop() opened a *second* recorder with its own encoding and
+        // source choice - the first one was never released, both held the microphone, and the failure
+        // that reached the panel ("AudioRecord.read = -2") came from whichever one the loop happened to
+        // be reading. openInput()/sourceCandidates() are now the only place a recorder is created.
         track = t
         try {
-            r.startRecording()
             t.play()
         } catch (e: Exception) {
             lastError = "start failed: ${e.message}"
@@ -175,18 +174,14 @@ class AudioEngine(
         framesQueued = 0
         running.set(true)
 
-        val inBuf = FloatArray(frames)
+        prefInput = input
+        capFrames = frames
+        capEncoding = AudioFormat.ENCODING_PCM_FLOAT
+        capOpen = false
+        capDead = false
         inThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-            while (running.get()) {
-                val n = r.read(inBuf, 0, frames, AudioFormat.ENCODING_PCM_FLOAT)
-                if (n > 0) {
-                    sink.onCapture(inBuf, n)
-                } else if (n < 0) {
-                    lastError = "AudioRecord.read = $n"
-                    running.set(false)
-                }
-            }
+            captureLoop()
         }, "ni-capture").apply { isDaemon = true; start() }
 
         val outBuf = FloatArray(frames)
@@ -206,9 +201,162 @@ class AudioEngine(
         }, "ni-render").apply { isDaemon = true; start() }
 
         if (preferredIgnored) lastError = "setPreferredDevice was refused by the platform"
+
+        // Give the capture thread a moment to open the microphone, so that "the engine is running and
+        // the microphone is dead" cannot be mistaken for "everything is fine". 1.5 s is short enough
+        // that the user sees it, long enough that a slow device is not failed spuriously.
+        val deadline = System.currentTimeMillis() + 1500
+        while (System.currentTimeMillis() < deadline && !capOpen && !capDead) {
+            try { Thread.sleep(20) } catch (e: InterruptedException) { }
+        }
+        if (!capOpen) {
+            if (capDead) {
+                if (lastError.isEmpty()) lastError = "no usable AudioRecord source"
+                lastError = "microphone could not be opened: $lastError"
+                stop()
+                return false
+            }
+            // Still trying (a slow device, or a source that takes its time): keep running, but say so.
+            lastError = "microphone has not opened yet (" +
+                "recording will start when it does): " + lastError
+        }
         routeProbe()
         return true
     }
+
+    /**
+     * Microphone -> engine, with the failure handling that the first field test proved was missing.
+     *
+     * What went wrong without it: `read()` returned -2 for every block, one negative return set
+     * `running = false`, and that stopped the *playback* loop too - so the app became both deaf and mute
+     * while still looking started, and the only evidence was the string "AudioRecord.read = -2".
+     *
+     * Now: a failed read is retried; after [kReadsBeforeRebuild] consecutive failures the capture is
+     * reopened as 16-bit PCM (universally supported, converted to float here); if that fails too, the
+     * next input source in the chain is tried. Playback is independent and keeps running throughout.
+     * Every rebuild is counted and reported, so "the microphone is not working" can never again be a
+     * mystery: the audio line says which format is running and how many reads failed.
+     */
+    private fun captureLoop() {
+        val kReadsBeforeRebuild = 12
+        var fails = 0
+        var sources = sourceCandidates()
+        var si = 0
+        val inBuf = FloatArray(capFrames)
+        val shortBuf = ShortArray(capFrames)
+        while (running.get()) {
+            val r = rec
+            if (r == null) {
+                // (re)open: try the current source with the current encoding, then 16-bit, then move on
+                val encodings = if (capEncoding == AudioFormat.ENCODING_PCM_FLOAT)
+                    intArrayOf(AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_16BIT)
+                else intArrayOf(AudioFormat.ENCODING_PCM_16BIT)
+                var opened = false
+                for (enc in encodings) {
+                    val src = sources[si % sources.size]
+                    val nr = openInput(src.first, enc, capFrames)
+                    if (nr != null) {
+                        rec = nr
+                        capEncoding = enc
+                        inputSourceName.set(src.first)
+                        lastError = if (enc == AudioFormat.ENCODING_PCM_16BIT)
+                            "capture opened as 16-bit PCM (this device refused 32-bit float reads)"
+                        else lastError
+                        if (Build.VERSION.SDK_INT >= 23) prefInput?.let { pd ->
+                            if (!nr.setPreferredDevice(pd))
+                                lastError = "the chosen microphone was refused by the platform; " +
+                                    "using the device default instead"
+                        }
+                        try { nr.startRecording() } catch (e: Exception) {
+                            lastError = "startRecording failed: ${e.message}"
+                            try { nr.release() } catch (e2: Exception) { }
+                            rec = null
+                            continue
+                        }
+                        capRebuilds++
+                        capOpen = true
+                        fails = 0
+                        opened = true
+                        break
+                    }
+                    lastError = "AudioRecord(${src.second}, ${encodingName(enc)}) could not be created"
+                }
+                if (!opened) {
+                    si++
+                    if (si >= sources.size) {
+                        // Every source, in both encodings, has been refused. This is not a transient
+                        // failure: say so once, keep retrying in the background, and keep playback
+                        // running - the far end may still be able to reach us.
+                        capDead = true
+                        Thread.sleep(500)
+                        si = 0
+                    }
+                    continue
+                }
+                continue
+            }
+            // The two encodings have separate read() overloads - float needs the FloatArray one and
+            // 16-bit needs the ShortArray one, and mixing them throws - so the 16-bit path is read into
+            // a ShortArray and converted here. The engine only ever sees float.
+            val n = if (capEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                r.read(inBuf, 0, inBuf.size, AudioFormat.ENCODING_PCM_FLOAT)
+            } else {
+                val m = r.read(shortBuf, 0, shortBuf.size)
+                if (m > 0) for (i in 0 until m) inBuf[i] = shortBuf[i] / 32768f
+                m
+            }
+            if (n > 0) {
+                fails = 0
+                sink.onCapture(inBuf, n)
+            } else {
+                fails++
+                capReadFailures++
+                if (fails >= kReadsBeforeRebuild) {
+                    // Give up on this recorder: close it, and let the top of the loop reopen (16-bit
+                    // first if we were on float) or move to the next source.
+                    lastError = "capture read failed $fails times in a row (last code $n): reopening"
+                    try { r.stop() } catch (e: Exception) { }
+                    try { r.release() } catch (e: Exception) { }
+                    rec = null
+                    fails = 0
+                } else {
+                    Thread.sleep(10)
+                }
+            }
+        }
+        try { rec?.stop() } catch (e: Exception) { }
+        try { rec?.release() } catch (e: Exception) { }
+        rec = null
+    }
+
+    /** The capture sources this platform will accept, most processed-avoiding first. */
+    private fun sourceCandidates(): List<Pair<Int, String>> {
+        val out = ArrayList<Pair<Int, String>>()
+        if (Build.VERSION.SDK_INT >= 24)
+            out.add(MediaRecorder.AudioSource.UNPROCESSED to "UNPROCESSED")
+        out.add(MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION")
+        out.add(MediaRecorder.AudioSource.MIC to "MIC")
+        return out
+    }
+
+    private fun encodingName(enc: Int): String = when (enc) {
+        AudioFormat.ENCODING_PCM_FLOAT -> "32-bit float"
+        AudioFormat.ENCODING_PCM_16BIT -> "16-bit PCM"
+        else -> "encoding #$enc"
+    }
+
+    private fun openInput(src: Int, encoding: Int, frames: Int): AudioRecord? = try {
+        val minBytes = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, encoding)
+        val bytes = if (minBytes > 0) maxOf(minBytes, frames * bytesPerSample(encoding)) else frames * bytesPerSample(encoding)
+        val r = AudioRecord(src, sampleRate, AudioFormat.CHANNEL_IN_MONO, encoding, bytes)
+        if (r.state == AudioRecord.STATE_INITIALIZED) r else { r.release(); null }
+    } catch (e: Exception) {
+        lastError = "AudioRecord($src, ${encodingName(encoding)}) threw: ${e.message}"
+        null
+    }
+
+    private fun bytesPerSample(encoding: Int): Int =
+        if (encoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2
 
     private fun routeProbe() {
         if (Build.VERSION.SDK_INT >= 24) {
@@ -269,8 +417,13 @@ class AudioEngine(
     /** What the status panel prints under "audio". Everything here is measured by the platform. */
     fun describe(): String = buildString {
         append(sampleRate).append(" Hz mono float, period ")
-        append(maxOf(1, sampleRate / 50)).append(" frames, input source ")
-        append(sourceName(inputSourceName.get()))
+        append(maxOf(1, sampleRate / 50)).append(" frames, capture ")
+        append(encodingName(capEncoding)).append(" from ")
+        append(if (inputSourceName.get() >= 0) sourceName(inputSourceName.get()) else "no source yet")
+        if (!capOpen) append(", CAPTURE NOT OPEN")
+        if (capDead) append(" (every input source this device offers was refused)")
+        if (capReadFailures > 0) append(", failed reads ").append(capReadFailures)
+        if (capRebuilds > 1) append(", capture reopened ").append(capRebuilds - 1).append(" times")
         append(", capture route ").append(routedInput)
         append(", playback route ").append(routedOutput)
         if (underruns >= 0) append(", track underruns ").append(underruns)

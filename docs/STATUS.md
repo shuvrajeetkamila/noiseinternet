@@ -233,6 +233,22 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    EXE on a Windows box with a speaker and a microphone: that is still the only thing standing between the
    current artifacts and gates E/F, and the report from the first attempt ("it never paired, from both the
    exe and the apk") produced four fixes that all sit in the path a first run takes - defects 32-35. The
+   second report (the phone's level sat at -120 dBFS and never moved) produced three more, and reading the
+   Windows audio code afterwards a fourth. **Defect 45**: the profile drop-down was empty because the
+   Android parser handed a JSON array to `JSONObject()`; it accepts both shapes now, and the Start button
+   refuses to run with a guessed profile - the first report could not tell a guessed profile from a
+   mismatched one, which is why that had to stop being possible. **Defect 46**: six status fields on both
+   Android screens read JSON keys the core does not write (`profile_name` for `profile`,
+   `useful_bps_up`/`down` for `useful_up_bps`/`down`, `retries` for `retransmits`), which is why the
+   profile line read `-`; all now use the core's spelling, checked field by field against
+   `StatusSnapshot::to_json()`. **Defect 47**: `WasapiEngine::capture` released a whole device packet
+   after copying only the part that fitted in the caller's buffer, dropping the rest silently - it keeps a
+   hold-over buffer now and drops nothing, which matters because the lost samples fall inside the burst
+   the far end is decoding. The phone's capture path was rewritten in the same pass: one recorder instead
+   of two (`start()` opened one and `captureLoop()` opened a second, unreleased, both holding the
+   microphone), float capture with automatic fallback to 16-bit PCM, a failed read retried instead of
+   ending the session, and the panel's `audio:` line now names the source, the format, the failed-read
+   count and whether capture is open at all. None of this has been near a phone or a sound card.
    things to check first on a re-run, in order: (a) does the passphrase field have the *same* 8+ characters
    on both ends (the apps now refuse to start otherwise, with the reason on screen); (b) the same profile
    number and session id on both - both apps now start on profile 10 / session id 7; (c) the one-line

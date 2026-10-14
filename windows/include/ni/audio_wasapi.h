@@ -77,6 +77,11 @@ class WasapiEngine {
   double fs_ = 0.0;
   int render_ch_ = 0, capture_ch_ = 0, render_buf_ = 0, capture_buf_ = 0;
   bool capture_silent_ = false;
+  // Samples read from the capture endpoint that did not fit in the caller's buffer last time.
+  // Nothing is dropped: the remainder is handed over at the start of the next capture() call.
+  // `off_` is the read cursor into it, so no element-moving on the hot path.
+  std::vector<float> cap_hold_;
+  int cap_hold_off_ = 0;
   std::string err_;
 };
 

@@ -20,6 +20,7 @@ import android.app.Activity
 import com.noiseinternet.core.NoiseCore
 import com.noiseinternet.core.NoiseService
 import com.noiseinternet.core.PhyTools
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -137,18 +138,39 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
 
     private fun parseProfiles(json: String): MutableList<Pair<Int, String>> {
         val out = mutableListOf<Pair<Int, String>>()
+        // ni_abi_profiles_json() returns a JSON ARRAY of profiles. This used to parse it as an object
+        // (JSONObject(json)), which throws on an array, so the spinner fell back to a single "#-1
+        // profile table unavailable" entry and the app then sent an invalid profile id to the engine -
+        // which quietly substituted its own default (DBPSK-MID) while the PC ran FD-LOW-DBPSK. Two ends
+        // on different profiles cannot decode one burst from each other, so this one parse failure was
+        // enough on its own to stop pairing ("it never paired ... most probably the android one").
+        // Accept either shape, so a future core change cannot reintroduce it.
         try {
-            val root = JSONObject(json)
-            val arr = if (root.has("profiles")) root.getJSONArray("profiles") else root.getJSONArray("items")
+            val t = json.trim()
+            val arr = when {
+                t.startsWith("[") -> JSONArray(t)
+                else -> {
+                    val root = JSONObject(t)
+                    when {
+                        root.has("profiles") -> root.getJSONArray("profiles")
+                        root.has("items") -> root.getJSONArray("items")
+                        else -> JSONArray()
+                    }
+                }
+            }
             for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                out.add(Pair(o.getInt("id"), o.optString("name", "?")))
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optInt("id", -1)
+                if (id < 0) continue
+                out.add(Pair(id, o.optString("name", "profile $id")))
             }
         } catch (e: Exception) {
-            // No profiles means no session can be configured, so say exactly that instead of listing
-            // a plausible-looking default.
             out.clear()
-            out.add(Pair(-1, "profile table unavailable: ${e.message}"))
+        }
+        if (out.isEmpty()) {
+            // Nothing to select means nothing can be configured. Say that, and never let a start go
+            // out with an id the engine will have to guess at.
+            out.add(Pair(-1, "profile table unavailable: ${json.take(60)}"))
         }
         return out
     }
@@ -162,6 +184,15 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
     private fun startLink() {
         val sel = profileSpinner.selectedItemPosition
         val pid = if (sel in profiles.indices) profiles[sel].first else -1
+        // A profile the core does not know is not a profile: the engine would substitute its own
+        // default and the two ends would talk past each other without a word on screen. Refuse, and
+        // name the reason (the profile list could not be read - see parseProfiles).
+        if (pid < 0) {
+            results.text = "Cannot start: this build could not read the core's modulation profile table, " +
+                "and starting with a guessed profile is how two devices end up unable to hear each other.\n" +
+                "Profile list: ${profiles.joinToString { "#${it.first} ${it.second}" }}"
+            return
+        }
         // The single most common reason this app never paired: an empty passphrase. The engine cannot
         // pair without one (it will not invent a key), so this is checked here, in words, before any
         // service starts - instead of leaving the user watching a status line that says nothing.
