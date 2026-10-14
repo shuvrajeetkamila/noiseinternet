@@ -164,14 +164,6 @@ int ni_wasapi_enumerate(std::vector<AudioDeviceInfo>* out, std::string* why_not)
   return (int)(out->size() - before);
 }
 
-int WasapiEngine::queued_frames() const {
-  if (!p_) return -1;
-  if (!p_->render.ac) return -1;
-  UINT32 pad = 0;
-  if (FAILED(p_->render.ac->GetCurrentPadding(&pad))) return -1;
-  return (int)pad;
-}
-
 struct WasapiEngine::Impl {
   struct Side {
     IMMDevice* dev = nullptr;
@@ -198,6 +190,15 @@ struct WasapiEngine::Impl {
     if (capture.ev) { CloseHandle(capture.ev); capture.ev = nullptr; }
   }
 };
+
+// Defined after Impl, because Impl is what it reads: the first version sat above the struct and MSVC
+// rejected it with C2027 (use of undefined type) - found by CI, not by reading.
+int WasapiEngine::queued_frames() const {
+  if (!p_ || !p_->render.ac) return -1;
+  UINT32 pad = 0;
+  if (FAILED(p_->render.ac->GetCurrentPadding(&pad))) return -1;
+  return (int)pad;
+}
 
 namespace {
 

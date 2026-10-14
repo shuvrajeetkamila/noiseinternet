@@ -66,6 +66,11 @@ class AudioEngine(
 
     private var rec: AudioRecord? = null
     private var track: AudioTrack? = null
+    // Frames this class has handed to the AudioTrack. `AudioTrack.getFramesWritten()` is a hidden API
+    // (the Kotlin build failed on it: "Unresolved reference"), so the count is kept here from write()'s
+    // own return value, which is public and exact.
+    @Volatile
+    private var framesQueued: Long = 0
     private var inThread: Thread? = null
     private var outThread: Thread? = null
     private val mgr: AudioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -167,6 +172,7 @@ class AudioEngine(
             stop()
             return false
         }
+        framesQueued = 0
         running.set(true)
 
         val inBuf = FloatArray(frames)
@@ -191,6 +197,7 @@ class AudioEngine(
                 if (n > 0) {
                     val w = t.write(outBuf, 0, n, AudioTrack.WRITE_BLOCKING)
                     if (w < n) overruns++
+                    if (w > 0) framesQueued += w.toLong()
                 } else {
                     Thread.sleep(4)
                 }
@@ -246,12 +253,12 @@ class AudioEngine(
         val t = track ?: return -1
         if (Build.VERSION.SDK_INT < 23) return -1
         return try {
-            val written = t.framesWritten
             val head = t.playbackHeadPosition.toLong() and 0xFFFFFFFFL   // it wraps at 2^32
-            val inFlight = written - head
+            val inFlight = framesQueued - head
+            val cap = t.bufferSizeInFrames.toLong()
             when {
-                inFlight < 0 -> 0L
-                inFlight > t.bufferSizeInFrames.toLong() -> t.bufferSizeInFrames.toLong()
+                inFlight < 0 -> 0L          // the head moved past our count: the track was flushed
+                inFlight > cap -> cap       // never report more than the buffer can hold
                 else -> inFlight
             }
         } catch (e: Exception) {
