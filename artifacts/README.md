@@ -1,6 +1,6 @@
 # artifacts/
 
-**Two real binaries now exist, built by CI.** They are published as the pre-release tag `ci-build`
+**Four real artifacts now exist, built by CI: an APK, a standalone Windows exe, and two zips.** They are published as the pre-release tag `ci-build`
 rather than committed here: the pipeline can rebuild either one in about three minutes, and an APK or
 EXE checked in with no reproducible build behind it is the sort of thing this project exists to avoid.
 
@@ -9,16 +9,31 @@ Release page (assets, manifest, caveats):
 
 | file | bytes | sha256 | what it is |
 |---|---|---|---|
-| `noiseinternet-debug.apk` | 4 093 453 | `f4218e77c3aa7675c5e80db64a97c0a838e4137c53de97ba585e400e60352b26` | Android app, `com.noiseinternet.app`, minSdk 23. Contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 344 B) and `lib/x86_64/libnoiseinternet_jni.so` (317 144 B) - the shared core, compiled by NDK r26 - plus `classes.dex` (2 313 188 B). Signed with a **debug** keystore created on the runner and destroyed with it: installable with `adb install`, not a release signature, not a Play Store publication. |
-| `NoiseInternet.exe` | 321 024 | `d01405a5f7cd0566fcf6e0b1c18261882382604992a1d3143cb676f30feb5f67` | `PE32+ executable (console) x86-64, for MS Windows, 6 sections`, built by MSVC 19.51 with the WASAPI backend compiled in (`NI_WITH_WASAPI`). **Unsigned**, so SmartScreen will warn - nothing vouches for the binary except this repository and the build log. |
+| `noiseinternet-debug.apk` | 4 093 449 | `2ad676aed4b67b8046989c4c0edd54050af2bbee796e1a74a4c320f5cac6e173` | Android app, `com.noiseinternet.app`, minSdk 23. Contains `lib/arm64-v8a/libnoiseinternet_jni.so` (284 344 B) and `lib/x86_64/libnoiseinternet_jni.so` (317 144 B) - the shared core, compiled by NDK r26 - plus `classes.dex` (2 313 188 B). Signed with a **debug** keystore created on the runner and destroyed with it: installable with `adb install`, not a release signature, not a Play Store publication. |
+| `NoiseInternet.exe` | 630 272 | `c1cb22561a3204e2361eb9077d67cb6b611411d0365b87f852b024d6cc6784ae` | `PE32+ executable (console) x86-64, for MS Windows, 7 sections`, MSVC 19.51, WASAPI backend compiled in (`NI_WITH_WASAPI`), **standalone**: the C++ runtime is linked in (`/MT`) so a clean Windows machine needs no redistributable. **Unsigned**, so SmartScreen will warn - nothing vouches for the binary except this repository and the build log. |
+| `NoiseInternet-windows-x64.zip` | 983 200 | `7198247a85efab4fc0eb39846f98de51aa6d2b928e98f728b2e79e01aeda7cca` | The exe, plus `ni.exe` (709 120 B, the CLI: `selftest`, `linksim`, `audit`), `README-RUN.md` (how to run both this and the APK, with a troubleshooting table), `BUILD-INFO.txt` (per-file size + sha256 and the import-table verdict), and `redist/` with unmodified `vcruntime140.dll` 124 544 B, `vcruntime140_1.dll` 49 792 B, `msvcp140.dll` 557 728 B + `NOTICE-redist.txt`. 8 files, 2 083 786 B uncompressed. |
+| `noiseinternet-android-windows.zip` | 2 941 353 | `8e620f5150c21342e824842a311f3b41c1764a13658017712ea90e29048ead78` | Everything in one download: `windows/` (the whole bundle above), `android/noiseinternet-debug.apk`, and `README-RUN.md` at the top level. |
 
-**Read the hashes below as an example, not as the current truth.** Every green push republishes both
-files under this tag, and the rebuild is not byte-reproducible: the debug keystore is generated fresh on
-each runner, so the APK's signature bytes change even when only a `.md` file did (4 093 453 B at
-`3a62a12`, 4 093 460 B at `683b2c4`), and the same C++ compiled twice by MSVC came out at the same
-321 024 B with a different sha256. The manifest in the release body is generated on the runner from the
-bytes it is publishing, so that - not this table - is what to verify a download against
-(`sha256sum` on your copy, compare with the release page).
+The numbers above are the build of commit `2226842` and are an **example, not the current truth**: every
+green push republishes these files under the same tag and the build is not byte-reproducible. The debug
+keystore is created fresh on each runner, so the APK's signature bytes move even when only a `.md` file
+changed, and the same C++ compiled twice by MSVC came out at an identical size with a different sha256. The
+manifest in the release body is generated on the runner from the bytes it publishes, so that - not this
+table - is what to verify a download against (`sha256sum` your copy, compare with the release page).
+
+The packaging step is not asked to believe the CMake option: it runs `dumpbin /dependents` on the exe that
+was actually linked and records the verdict. From the current run's `BUILD-INFO.txt`:
+
+```
+crt:  STATIC (/MT): the exe imports no CRT DLL, so it is standalone; redist/ is a fallback only
+pkg:  NoiseInternet.exe imports: KERNEL32.dll ole32.dll WS2_32.dll
+file: PE32+ executable (console) x86-64, for MS Windows, 7 sections
+```
+
+The first attempt at this published a `/MD` exe anyway, because under CMake policy `CMP0091=NEW` the
+runtime is chosen by `CMAKE_MSVC_RUNTIME_LIBRARY` rather than by a `/MD` sitting in the flag variables, so
+the string replace had nothing to replace (defect 28 in `reports/RESULTS.md`). The import-table check is
+what caught it, one build after it happened, instead of a README asserting a property nobody measured.
 
 Both come from `.github/workflows/build.yml`, and the release job only runs when the Android and
 Windows jobs are green: the APK step fails if the native library is missing from the archive, the EXE
