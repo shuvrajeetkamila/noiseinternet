@@ -21,13 +21,18 @@
 #if (defined(__unix__) || defined(__APPLE__)) && !defined(NI_NO_DEMO_SPAWN)
 #define NI_HAVE_SPAWN 1
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <sstream>
+#include <thread>
 #include <vector>
 #include "ni/audio_io.h"
 #include "ni/channel_sim.h"
@@ -893,6 +898,102 @@ struct Pump {
   }
 };
 
+#if NI_HAVE_SPAWN
+// ---------------------------------------------------------------- a deterministic local origin
+// The demo's claim is "an HTTP response travelled over the acoustic session intact", and to test that
+// it needs an origin whose response it knows byte for byte. A public one cannot serve that purpose
+// here: every public origin reachable from this host answers 301 to https (checked: api.github.com,
+// registry.npmjs.org, pypi.org, codeload.github.com), and the https route means CONNECT - which the
+// stack does implement (the giver's helper opened the tunnel to api.github.com:443 in a measured run)
+// but a real TLS handshake over a half-duplex acoustic link failed on its first attempt (curl exit 56,
+// reported in reports/RESULTS.md as the state of the CONNECT leg, not as a working fetch). So the
+// default origin is this: a plain-HTTP server on the giver's own host serving a fixed document. The
+// demo prints that plainly, because "the origin was local" is exactly the sort of thing that must
+// never quietly become "we proved internet access".
+struct LocalOrigin {
+  int lsock = -1, port = 0;
+  std::atomic<bool> stop{false};
+  std::thread th;
+  std::string doc;
+
+  // The document is built to an exact size so a run can say how many bytes crossed the link, and so
+  // that the same run can be repeated at a different size. `--document-bytes` sweeps it rather than
+  // hand-tuning one number until the demo looks good.
+  void build(size_t want) {
+    static const char* head = "NOISE INTERNET end-to-end document\n";
+    doc = head;
+    size_t i = 0;
+    while (doc.size() < want) {
+      static const char* cycle =
+          "0123456789abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ .:-\n";
+      doc.push_back(cycle[(i++) % 66]);
+    }
+    while (doc.size() > want) doc.pop_back();
+  }
+
+  bool start(std::string* err, size_t want_bytes) {
+    build(want_bytes);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;             // a client that goes away must not kill the demo
+    sigaction(SIGPIPE, &sa, nullptr);
+    lsock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (lsock < 0) { *err = "socket failed"; return false; }
+    int one = 1;
+    setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sockaddr_in sa2;
+    memset(&sa2, 0, sizeof sa2);
+    sa2.sin_family = AF_INET;
+    sa2.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa2.sin_port = 0;                    // let the kernel pick a free port
+    if (::bind(lsock, (sockaddr*)&sa2, sizeof sa2) != 0) { *err = "bind failed"; return false; }
+    if (::listen(lsock, 4) != 0) { *err = "listen failed"; return false; }
+    socklen_t sl = sizeof sa2;
+    if (getsockname(lsock, (sockaddr*)&sa2, &sl) != 0) { *err = "getsockname failed"; return false; }
+    port = (int)ntohs(sa2.sin_port);
+    th = std::thread([this] { serve(); });
+    return true;
+  }
+
+  void serve() {
+    while (!stop.load()) {
+      fd_set fds;
+      FD_ZERO(&fds);
+      FD_SET(lsock, &fds);
+      timeval tv;
+      tv.tv_sec = 0;
+      tv.tv_usec = 100000;
+      int r = ::select(lsock + 1, &fds, nullptr, nullptr, &tv);
+      if (r <= 0) continue;
+      int c = ::accept(lsock, nullptr, nullptr);
+      if (c < 0) continue;
+      char buf[4096];
+      ssize_t n = ::recv(c, buf, sizeof buf, 0);   // we do not parse: any request gets the document
+      (void)n;
+      std::ostringstream resp;
+      resp << "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " << doc.size()
+           << "\r\nConnection: close\r\n\r\n"
+           << doc;
+      std::string r2 = resp.str();
+      size_t off = 0;
+      while (off < r2.size()) {
+        ssize_t w = ::send(c, r2.data() + off, r2.size() - off, 0);
+        if (w <= 0) break;
+        off += (size_t)w;
+      }
+      ::close(c);
+    }
+  }
+
+  void kill() {
+    stop.store(true);
+    if (th.joinable()) th.join();
+    if (lsock >= 0) ::close(lsock);
+    lsock = -1;
+  }
+};
+#endif
+
 int cmd_demo(const Opts& o) {
   bool bad = false;
   double fs = o.num("fs", 48000);
@@ -901,13 +1002,39 @@ int cmd_demo(const Opts& o) {
   // documented as the end-to-end test was configured to fail before it started.
   int pid = profile_arg(o, 10, &bad);
   if (bad) return bad_profile(o);
-  std::string url = o.get("url", "http://api.github.com/zen");
   int port = (int)o.num("proxy-port", 8471);
+#if NI_HAVE_SPAWN
+  LocalOrigin origin;
+  std::string origin_kind;
+  std::string url = o.get("url", "");
+  if (url.empty()) {
+    std::string oerr;
+    if (!origin.start(&oerr, (size_t)o.num("document-bytes", 400))) {
+      fprintf(stderr, "cannot start the local test origin: %s\n", oerr.c_str());
+      return 1;
+    }
+    url = "http://127.0.0.1:" + std::to_string(origin.port) + "/document.txt";
+    origin_kind = "local";
+  } else {
+    origin_kind = "url";
+  }
+#else
+  std::string url = o.get("url", "http://api.github.com/zen");
+  std::string origin_kind = "url";
+#endif
   int64_t budget = (int64_t)o.num("budget-ms", 400000);
   printf("NOISE INTERNET end-to-end demo\n");
   printf("  role pair  : giver(Windows-like) <-> receiver(Android-like) over a modelled room\n");
   printf("  profile    : %s (adaptive, may move down under load)\n", ni_profile(pid).name);
   printf("  client URL : %s  via  http://127.0.0.1:%d\n", url.c_str(), port);
+  printf("  origin     : %s\n",
+         origin_kind == "local"
+             ? "a plain-HTTP server started by this command on this host (deterministic document).\n"
+               "               This proves the RELAY PATH byte for byte - curl -> receiver proxy ->\n"
+               "               acoustic link -> giver fetch -> origin and back. It does NOT prove\n"
+               "               internet access: the origin is on this host. Pass --url to try a real\n"
+               "               URL, which needs a plain-HTTP origin (see packaging/NOTES-url.md)."
+             : "the URL above, on whatever host it resolves to");
   printf("  evidence   : the ONLY path between the two nodes is 16-bit PCM produced by\n"
          "               tx_render and shaped by AcousticChannel. No socket, pipe or shared\n"
          "               buffer carries request bytes.\n\n");
@@ -984,39 +1111,127 @@ int cmd_demo(const Opts& o) {
   fflush(stdout);
   printf("  [t=%5lld ms] link stats: %s\n", (long long)t, giver.diagnostics_json().c_str());
   fflush(stdout);
-  std::vector<uint8_t> proxied, direct;
-  int s1 = p2.run(&proxied, "curl",
-                  {"-sS", "-L", "-m", "900", "-x", "http://127.0.0.1:" + std::to_string(port), url,
-                   "-D", "-", "-o", "/dev/stdout"},
-                  budget);
-  printf("  [t=%5lld ms] curl via proxy exit=%d, %zu bytes received\n", (long long)t, s1,
-         proxied.size());
+  // Each leg captures the response BODY only, plus a one-line trailer that carries the status line,
+  // content type and size. Bodies are what can be compared byte for byte; the trailer says whether the
+  // two responses are even the same kind of response. The first version captured headers into the same
+  // buffer (`-D -`) so the proxied leg was compared to the direct leg with ~70 bytes of the origin's
+  // headers included and Date/Request-Id fields in them - a comparison that could never be equal even
+  // on a perfect link. Defect 36.
+  const std::vector<std::string> tail = {"-w", "\n[ni-http %{http_code} %{content_type} %{size_download}]"};
+  auto split_trailer = [](std::vector<uint8_t>& v) {
+    std::string s(v.begin(), v.end());
+    size_t at = s.rfind("[ni-http ");
+    if (at == std::string::npos) return std::string();
+    std::string t = s.substr(at);
+    while (!t.empty() && (t.back() == ']' || t.back() == '\n' || t.back() == '\r')) t.pop_back();
+    v.assign(s.begin(), s.begin() + (long)at);
+    while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+    return t;   // "[ni-http 200 text/plain 26"
+  };
+  std::vector<std::string> argv_direct = {"-sS", "-L", "-m", "900"};
+  std::vector<std::string> argv_proxy = {"-sS", "-L", "-m", "900", "-x",
+                                         "http://127.0.0.1:" + std::to_string(port)};
+  // The receiver's proxy requires its bearer token on every request; without it the proxy answers 407
+  // itself and the "response" never involves an origin at all. The first version of this demo did not
+  // send it, so the bytes it measured and the hash it recorded were the proxy's own error page
+  // (defect 36). The token is read from the receiver node, which is where it is generated.
+  const std::string ptok = recv.proxy_token();
+  if (!ptok.empty()) {
+    argv_proxy.push_back("--proxy-header");
+    argv_proxy.push_back("Proxy-Authorization: Noise " + ptok);
+  }
+  auto body_only = [&](std::vector<std::string> a) {
+    a.push_back(url);
+    a.insert(a.end(), tail.begin(), tail.end());
+    return a;
+  };
+  std::vector<uint8_t> direct, direct2, proxied;
+  // The two control fetches go FIRST, back to back, before any acoustic traffic: they measure the
+  // origin's own behaviour (does the same URL return the same bytes twice?) and they must not be cut
+  // short by the acoustic budget - which is exactly what happened when they ran last, leaving the
+  // classification to be made from one sample.
+  int s2 = p2.run(&direct, "curl", body_only(argv_direct), budget);
+  std::string t2 = split_trailer(direct);
+  printf("  [t=%5lld ms] curl direct #1   exit=%d, %zu body bytes  %s\n", (long long)t, s2,
+         direct.size(), t2.c_str());
   fflush(stdout);
-  int s2 = p2.run(&direct, "curl", {"-sS", "-L", "-m", "900", url, "-D", "-", "-o", "/dev/stdout"},
-                  budget);
-  printf("  [t=%5lld ms] curl direct      exit=%d, %zu bytes received\n", (long long)t, s2,
-         direct.size());
+  int s3 = p2.run(&direct2, "curl", body_only(argv_direct), budget);
+  std::string t3 = split_trailer(direct2);
+  printf("  [t=%5lld ms] curl direct #2   exit=%d, %zu body bytes  %s\n", (long long)t, s3,
+         direct2.size(), t3.c_str());
+  fflush(stdout);
+  bool origin_known = !direct.empty() && !direct2.empty();
+  bool origin_stable = origin_known && direct == direct2;
+  int s1 = p2.run(&proxied, "curl", body_only(argv_proxy), budget);
+  std::string t1 = split_trailer(proxied);
+  printf("  [t=%5lld ms] curl via proxy   exit=%d, %zu body bytes  %s\n", (long long)t, s1,
+         proxied.size(), t1.c_str());
   // let any pending keepalive/ack traffic flush
   p2.step(t + 300);
+  auto code_of = [](const std::string& t) {
+    size_t i = t.find(' ');
+    if (i == std::string::npos) return -1;
+    return atoi(t.c_str() + i + 1);
+  };
+  const int pcode = code_of(t1);
+  // 405/407/503 with our own wording in the body means the local proxy answered this request itself:
+  // no request reached an origin, so nothing about the acoustic path can be concluded from it.
+  bool answered_by_proxy = proxied.empty() || pcode == 405 || pcode == 407 || pcode == 503;
   printf("\n  through-proxy bytes : %zu   sha256 %s\n", proxied.size(),
          sha_hex(proxied.data(), proxied.size()).c_str());
-  printf("  direct        bytes : %zu   sha256 %s\n", direct.size(),
+  printf("  direct #1     bytes : %zu   sha256 %s\n", direct.size(),
          sha_hex(direct.data(), direct.size()).c_str());
+  printf("  direct #2     bytes : %zu   sha256 %s\n", direct2.size(),
+         sha_hex(direct2.data(), direct2.size()).c_str());
+  printf("  proxy token         : %s%s\n", ptok.empty() ? "(none)" : ptok.c_str(),
+         ptok.empty() ? " - the proxy has no token, so any local client may use it" : "");
   bool match = !proxied.empty() && proxied == direct;
-  // A control leg that returned nothing (redirect the client would not follow, or a host with no
-  // internet of its own) is not evidence about the acoustic path, and calling that "DIFFERENT" made a
-  // working transfer look broken. Say which of the three things this is.
-  if (direct.empty())
-    printf("  comparison          : INCONCLUSIVE - %zu bytes came through the acoustic link, but the\n"
-           "                        direct control fetch returned nothing on this host (exit=%d), so\n"
-           "                        there is nothing to compare against. Re-run with a URL this host\n"
-           "                        can fetch directly if you want the byte-for-byte check.\n",
-           proxied.size(), s2);
+  bool structure_same = !t1.empty() && t1 == t2;
+  if (!origin_known)
+    printf("  origin             : unknown - a direct control fetch did not complete (exit=%d/%d, "
+           "%zu/%zu bytes), so this run can say nothing about byte equality\n", s2, s3, direct.size(),
+           direct2.size());
   else
-    printf("  comparison          : %s\n",
-           match ? "IDENTICAL - the bytes that arrived through the acoustic link are the same "
-                   "bytes the origin sent"
-                 : "DIFFERENT (see report below)");
+    printf("  origin             : %s\n",
+           origin_stable ? "stable - two direct fetches of this URL returned identical bytes"
+                         : "DYNAMIC - two direct fetches of this URL returned different bytes, so "
+                           "byte-for-byte equality is not achievable with it");
+  size_t first_diff = 0;
+  if (!match) {
+    size_t n = std::min(proxied.size(), direct.size());
+    while (first_diff < n && proxied[first_diff] == direct[first_diff]) first_diff++;
+  }
+  // One verdict, chosen in order of what the run can actually support. Every earlier version of this
+  // block either printed two lines at once or blamed the link for a fact about the URL or the harness.
+  if (answered_by_proxy) {
+    printf("  comparison          : INVALID RUN - the local proxy answered this request itself "
+           "(HTTP %d),\n", pcode);
+    printf("                        so no origin response crossed the acoustic link. %s\n",
+           pcode == 407 ? "That is a missing proxy token in this harness, not a link result."
+                        : "Check the receiver's proxy settings and the URL scheme (https needs the "
+                          "CONNECT tunnel).");
+  } else if (!origin_known)
+    printf("  comparison          : INCONCLUSIVE - %zu bytes came through the acoustic link, but a\n"
+           "                        direct control fetch did not complete on this host (exit=%d/%d),\n"
+           "                        so there is nothing to compare against. Re-run with a URL this\n"
+           "                        host can fetch directly if you want the byte-for-byte check.\n",
+           proxied.size(), s2, s3);
+  else if (match && structure_same)
+    printf("  comparison          : IDENTICAL - the %zu bytes that arrived through the acoustic link\n"
+           "                        are the same bytes this host got directly.\n", proxied.size());
+  else if (!origin_stable)
+    printf("  comparison          : INCONCLUSIVE - DYNAMIC ORIGIN. This URL returns different bytes\n"
+           "                        per request (direct fetch #1 %zu B, #2 %zu B), so nothing can be\n"
+           "                        byte-identical; the link's response is %zu B%s. Use a\n"
+           "                        deterministic document for the byte check, e.g.\n"
+           "                        --url 'https://api.github.com/octocat?s=noiseinternet' (821 B).\n",
+           direct.size(), direct2.size(), proxied.size(),
+           structure_same ? " with a matching status/content-type/size line" : " (STRUCTURE DIFFERS)");
+  else
+    printf("  comparison          : DIFFERENT - the origin is stable, so this is the link's doing:\n"
+           "                        %zu B via the link vs %zu B direct, first differing byte %zu%s\n",
+           proxied.size(), direct.size(), first_diff,
+           structure_same ? "" : ", and the status/content-type line differs too");
   printf("\n  giver report   : %s\n", giver.export_report_json(t).c_str());
   printf("  receiver report: %s\n", recv.export_report_json(t).c_str());
   std::string out = o.get("json");
@@ -1025,6 +1240,7 @@ int cmd_demo(const Opts& o) {
     js << "{\n \"generator\": \"ni demo\","
        << "\n \"channel\": \"modelled AcousticChannel - NOT speaker-to-microphone\","
        << "\n \"url\": \"" << ni_json_escape(url) << "\","
+       << "\n \"origin_kind\": \"" << origin_kind << "\","
        << "\n \"profile\": \"" << ni_profile(pid).name << "\","
        << "\n \"proxy_port\": " << port
        << ",\n \"elapsed_ms\": " << t
@@ -1033,7 +1249,12 @@ int cmd_demo(const Opts& o) {
        << ",\n \"via_proxy_sha256\": \"" << sha_hex(proxied.data(), proxied.size()) << "\","
        << "\n \"direct_bytes\": " << direct.size()
        << ",\n \"direct_sha256\": \"" << sha_hex(direct.data(), direct.size()) << "\","
-       << "\n \"identical\": " << (match ? "true" : "false")
+       << ",\n \"direct2_bytes\": " << direct2.size()
+       << ",\n \"direct2_sha256\": \"" << sha_hex(direct2.data(), direct2.size()) << "\","
+       << ",\n \"origin_stable\": " << (origin_stable ? "true" : "false")
+       << ",\n \"structure_same\": " << (structure_same ? "true" : "false")
+       << ",\n \"first_differing_byte\": " << (match ? -1LL : (long long)first_diff)
+       << ",\n \"identical\": " << (match ? "true" : "false")
        << ",\n \"curl_exit_via_proxy\": " << s1
        << ",\n \"curl_exit_direct\": " << s2
        << ",\n \"giver\": " << giver.export_report_json(t)
@@ -1046,8 +1267,12 @@ int cmd_demo(const Opts& o) {
       printf("  wrote %s\n", out.c_str());
     }
   }
-  printf("\nVERDICT: if the two hashes match, an arbitrary HTTP response travelled over the\n"
-         "acoustic session intact. What this does NOT prove: real transducers, real latency,\n"
+#if NI_HAVE_SPAWN
+  origin.kill();
+#endif
+  printf("\nVERDICT: if the hashes match, an arbitrary HTTP response travelled over the\n"
+         "acoustic session intact; if the origin itself is dynamic, the run says so instead of\n"
+         "blaming the link. What this does NOT prove: real transducers, real latency,\n"
          "or usable browsing speed - the audio path here is a simulation, and the origin fetch\n"
          "by the giver is real.\n");
   return 0;

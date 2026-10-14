@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <algorithm>
@@ -446,6 +447,23 @@ GiverGateway::~GiverGateway() {
   streams_.clear();
 }
 
+// Set NI_GATEWAY_TRACE=1 to have the giver's fetch helper narrate what it is doing. It was added
+// because "fetches_fail 5825" in a status report names the symptom and not the cause: the counter
+// increments at five different places and a status JSON cannot say which one fired, with what code,
+// after how many bytes. An environment switch keeps the library quiet by default and needs no API.
+static bool ni_gw_trace() {
+  static int v = -1;
+  if (v < 0) v = getenv("NI_GATEWAY_TRACE") ? 1 : 0;
+  return v != 0;
+}
+#define NI_GW_LOG(...)                                   \
+  do {                                                   \
+    if (ni_gw_trace()) {                                 \
+      fprintf(stderr, "[gateway] " __VA_ARGS__);         \
+      fflush(stderr);                                    \
+    }                                                    \
+  } while (0)
+
 int GiverGateway::resolve(const std::string& host, std::string* ip) {
   addrinfo hints;
   memset(&hints, 0, sizeof hints);
@@ -465,6 +483,13 @@ int GiverGateway::resolve(const std::string& host, std::string* ip) {
 
 int GiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, size_t n,
                             uint16_t flags) {
+  NI_GW_LOG("on_stream id=%u type=%d n=%zu flags=%u\n", (unsigned)stream, type, n, (unsigned)flags);
+  if ((flags & NI_MFLAG_FIRST) && n && ni_gw_trace()) {
+    std::string t((const char*)data, n < 200 ? n : 200);
+    for (size_t i = 0; i < t.size(); i++)
+      if ((unsigned char)t[i] < 32 && t[i] != '\n' && t[i] != '\r') t[i] = '.';
+    NI_GW_LOG("  first payload: %s\n", t.c_str());
+  }
   auto it = streams_.find(stream);
   if (type == NI_MSG_CLOSE || type == NI_MSG_ABORT) {
     if (it != streams_.end()) {
@@ -474,7 +499,10 @@ int GiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, size
     return NI_OK;
   }
   if (it == streams_.end()) {
-    if ((flags & NI_MFLAG_FIRST) == 0) return NI_ERR_PARAM;  // never saw the open
+    if ((flags & NI_MFLAG_FIRST) == 0) {
+      NI_GW_LOG("on_stream id=%u: no open seen for this stream - dropped\n", (unsigned)stream);
+      return NI_ERR_PARAM;  // never saw the open
+    }
     if (streams_.size() >= NI_PROXY_MAX_STREAMS) return NI_ERR_OVERFLOW;
     std::unique_ptr<Stream> s(new Stream());
     s->id = stream;
@@ -519,8 +547,14 @@ bool parse_url(const std::string& u, Url* o) {
   size_t q = u.find('/', p);
   std::string hp = q == std::string::npos ? u.substr(p) : u.substr(p, q - p);
   o->path = q == std::string::npos ? "/" : u.substr(q);
+  // Split "host:port" - but not the colons inside an IPv6 literal. The old condition was
+  // `c > hp.rfind(']')`, and for a host with no brackets rfind(']') is npos, so `c > npos` is false
+  // and the port was NEVER split: the gateway then called getaddrinfo("127.0.0.1:40809"), failed, and
+  // - because a failed stream was retried on every pump pass - logged 3348 identical DNS failures for
+  // one request. Any URL with an explicit port was unfetchable; the default-port case hid it.
   size_t c = hp.rfind(':');
-  if (c != std::string::npos && c > hp.rfind(']')) {
+  size_t br = hp.rfind(']');
+  if (c != std::string::npos && (br == std::string::npos || c > br)) {
     o->port = atoi(hp.c_str() + c + 1);
     hp = hp.substr(0, c);
   }
@@ -531,6 +565,7 @@ bool parse_url(const std::string& u, Url* o) {
 
 int GiverGateway::push(Stream& s, const uint8_t* p, size_t n) {
   if (!send_) return NI_ERR_STATE;
+  NI_GW_LOG("push id=%u n=%zu\n", (unsigned)s.id, n);
   size_t off = 0;
   while (off < n || (off == 0 && n == 0)) {
     size_t take = ni_min((size_t)16384, n - off);
@@ -545,6 +580,8 @@ int GiverGateway::push(Stream& s, const uint8_t* p, size_t n) {
 }
 
 int GiverGateway::step(Stream& s, int64_t now_ms) {
+  NI_GW_LOG("step id=%u head_done=%d sock=%d reqbuf=%zu\n", (unsigned)s.id, (int)s.head_done,
+            (int)s.sock, s.reqbuf.size());
   if (!s.head_done) return 0;
   if (s.sock < 0) {
     ProxyRequest req;
@@ -601,6 +638,7 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
     }
     std::string ip;
     if (resolve(host, &ip) != NI_OK) {
+      NI_GW_LOG("stream %u DNS failed for '%s'\n", (unsigned)s.id, host.c_str());
       fetches_fail++;
       std::string why = "DNS failed for " + host;
       send_(s.id + 16384, NI_MSG_ABORT, (const uint8_t*)why.data(), why.size(), NI_MFLAG_LAST);
@@ -619,6 +657,8 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
     set_nonblock(s.sock);
     int r = ::connect(s.sock, (sockaddr*)&sa, sizeof sa);
     if (r != 0 && NI_SOCKERR() != NI_EINPROGRESS) {
+      NI_GW_LOG("stream %u connect(%s:%u) failed errno=%d\n", (unsigned)s.id, ip.c_str(),
+                (unsigned)port, NI_SOCKERR());
       fetches_fail++;
       std::string why = "connect failed to " + host;
       send_(s.id + 16384, NI_MSG_ABORT, (const uint8_t*)why.data(), why.size(), NI_MFLAG_LAST);
@@ -628,6 +668,9 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
     }
     s.connected_at_ms = now_ms;
     s.want_connect = is_connect;
+    NI_GW_LOG("stream %u %s %s:%u  (host=%s)\n", (unsigned)s.id,
+              is_connect ? "CONNECT" : (allow_http_ ? "GET" : "GET(no-http)"), ip.c_str(),
+              (unsigned)port, host.c_str());
     return 0;
   }
   // connected (or connecting): send the request, then pump the socket
@@ -667,6 +710,8 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
     if (r > 0) {
       s.total_read += (size_t)r;
       if (s.total_read > opt_.max_response) {
+        NI_GW_LOG("stream %u response exceeded the cap (%zu > %zu)\n", (unsigned)s.id, s.total_read,
+                  (size_t)opt_.max_response);
         fetches_fail++;
         std::string why = "response exceeded the giver cap";
         push(s, (const uint8_t*)"\r\n", 2);
@@ -674,8 +719,11 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
         s.done = true;
         return -1;
       }
-      if (s.tunnel_open || push(s, (const uint8_t*)buf, (size_t)r) != NI_OK) {
+      int push_rc = s.tunnel_open ? NI_OK : push(s, (const uint8_t*)buf, (size_t)r);
+      if (s.tunnel_open || push_rc != NI_OK) {
         if (!s.tunnel_open) {
+          NI_GW_LOG("stream %u push failed rc=%d after %zu bytes of response\n", (unsigned)s.id,
+                    push_rc, s.total_read);
           fetches_fail++;
           // link cannot carry it: abort rather than silently truncating
           std::string why = "acoustic link buffer full";
@@ -693,6 +741,7 @@ int GiverGateway::step(Stream& s, int64_t now_ms) {
         fetches_ok++;
       } else {
         send_(s.id + 16384, NI_MSG_CLOSE, nullptr, 0, NI_MFLAG_LAST);
+        NI_GW_LOG("stream %u tunnel closed after %zu bytes read\n", (unsigned)s.id, s.total_read);
       }
       return -1;
     }
@@ -717,8 +766,11 @@ int GiverGateway::pump(int64_t now_ms) {
     if (!s.start_ms) s.start_ms = now_ms;
     if (s.sock < 0 && !s.head_done) continue;
     if (s.sock < 0) {
-      // finish the connect handshake bookkeeping
-      step(s, now_ms);
+      // Finish the connect bookkeeping. step() returns -1 when this stream is finished - a failed
+      // resolve, a failed connect, an aborted request - and that return value used to be discarded
+      // here, so the stream stayed in the map and every pump pass (200 Hz) retried it: one bad URL
+      // produced 3348 "DNS failed" lines and inflated fetches_fail from 1 to 3348.
+      if (step(s, now_ms) != 0) dead.push_back(kv.first);
       continue;
     }
     if (s.sock >= 0 && !s.sent_req && !s.connected) {

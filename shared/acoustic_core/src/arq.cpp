@@ -38,11 +38,20 @@ int ArqEngine::send_message(uint16_t stream, MsgType type, const uint8_t* data, 
   const int chunk = cfg_.max_payload - overhead;
   if (n > (size_t)chunk * 4096) return NI_ERR_OVERFLOW;  // bounded per message
   size_t off = 0;
+  // FIRST/LAST belong to the message, and only the FIRST fragment may claim FIRST and only the LAST
+  // fragment may claim LAST. The caller's flags used to be copied into every fragment and then OR'd
+  // with the per-fragment bits, so a message that the transport had to split arrived at its consumer
+  // as a series of messages that each said "this is the whole thing": a 60-byte HTTP request became
+  // three 14-byte "complete" requests, the gateway marked its head complete after the first one and
+  // could never parse it. Every proxied HTTP request failed that way (found through the gateway trace
+  // added this session, defect 37). Strip the two bits from what the caller asks for and set them
+  // per fragment.
+  const uint16_t keep = (uint16_t)(mflags & ~(uint16_t)(NI_MFLAG_FIRST | NI_MFLAG_LAST));
   if (n == 0) {
     Fragment fr;
     fr.stream = stream;
     fr.type = (uint8_t)type;
-    fr.flags = (uint8_t)((mflags & 0xFF) | NI_MFLAG_FIRST | NI_MFLAG_LAST);
+    fr.flags = (uint8_t)((keep & 0xFF) | NI_MFLAG_FIRST | NI_MFLAG_LAST);
     fr.offset = 0;
     fr.len = 0;
     uint8_t buf[12];
@@ -54,7 +63,7 @@ int ArqEngine::send_message(uint16_t stream, MsgType type, const uint8_t* data, 
     Fragment fr;
     fr.stream = stream;
     fr.type = (uint8_t)type;
-    fr.flags = (uint8_t)(mflags & 0xFF);
+    fr.flags = (uint8_t)(keep & 0xFF);
     if (off == 0) fr.flags |= NI_MFLAG_FIRST;
     if (off + take >= n) fr.flags |= NI_MFLAG_LAST;
     fr.offset = (uint32_t)off;
