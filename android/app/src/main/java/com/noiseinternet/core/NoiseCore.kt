@@ -18,11 +18,15 @@ class NoiseCore(config: Config) {
     data class Config(
         val name: String = "android",
         val role: Role = Role.RECEIVER,
-        val profile: Int = 2,               // DBPSK-MID, the profile the self-test ranked best
+        // FD-LOW-DBPSK. Not "the best profile": the one every measured run has paired and delivered
+        // on, and the low band (700-3600 Hz) is the one that survives a reflective room. The Windows
+        // app defaults to the same profile and the same session id, because two apps whose defaults
+        // differ can never pair by accident - which is exactly what happened in the field.
+        val profile: Int = 10,
         val rxProfile: Int = -1,            // FDD only
         val sampleRate: Int = 48000,
         val txAmplitude: Double = 0.85,
-        val sessionId: Int = 0,
+        val sessionId: Int = 7,             // same default as the Windows app: see the profile note
         val pairingSecret: String = "",
         val duplex: Boolean = false,
         val proxyPort: Int = 8471,
@@ -60,6 +64,9 @@ class NoiseCore(config: Config) {
     external fun start(): Int
     external fun stop(): Int
     external fun step(nowMs: Long): Int
+
+    /** Frames the AudioTrack still owes the speaker (see the native side for why it matters). */
+    external fun setTxBacklog(frames: Long): Int
     external fun feedPcm(pcm: FloatArray, nFrames: Int): Int
     external fun pullPcm(out: FloatArray, cap: Int): Int
     external fun pullPcmNeeded(): Int
@@ -126,6 +133,16 @@ class NoiseCore(config: Config) {
         val tunnelUp: Boolean,
         val internetOk: Boolean,
         val audioNote: String,
+        // Diagnosis: the newest microphone block's level, how many bursts had a sync but could not be
+        // read, how many callbacks found nothing, and the engine's own explanation when pairing could
+        // not even be attempted (an empty passphrase). These are what turn "it does not work" into
+        // "the microphone hears nothing" / "bursts arrive but cannot be decoded".
+        val inDbfs: Double?,
+        val syncHits: Long?,
+        val rxNoFrame: Long?,
+        val pairingNote: String,
+        val pairing: String,     // "none" | "wait-challenge" | "wait-response" | "paired" | "failed"
+        val sas: String,         // the match code: four words both ends must agree on
         val raw: String,
     ) {
         companion object {
@@ -142,7 +159,9 @@ class NoiseCore(config: Config) {
                         usefulBpsDown = null, framesSent = null, framesReceived = null,
                         retries = null, crcFail = null, bytesSent = null, bytesReceived = null,
                         mtu = null, tunnelUp = false, internetOk = false,
-                        audioNote = "status JSON could not be parsed: ${e.message}", raw = json,
+                        audioNote = "status JSON could not be parsed: ${e.message}", inDbfs = null,
+                        syncHits = null, rxNoFrame = null, pairingNote = "", pairing = "unknown",
+                        sas = "", raw = json,
                     )
                 }
 
@@ -172,6 +191,12 @@ class NoiseCore(config: Config) {
                     tunnelUp = o.optBoolean("tunnel_up", false),
                     internetOk = o.optBoolean("internet_ok", false),
                     audioNote = o.optString("audio_note", ""),
+                    inDbfs = d("in_dbfs"),
+                    syncHits = l("sync_hits"),
+                    rxNoFrame = l("rx_no_frame"),
+                    pairingNote = o.optString("pairing_note", ""),
+                    pairing = o.optString("pairing", "none"),
+                    sas = o.optString("sas", ""),
                     raw = json,
                 )
             }
@@ -179,6 +204,28 @@ class NoiseCore(config: Config) {
 
         fun f(v: Double?, fmt: String = "%.1f"): String = v?.let { String.format(fmt, it) } ?: "-"
         fun n(v: Number?): String = v?.toString() ?: "-"
+
+        /**
+         * What to tell the user when nothing is pairing, from the engine's own counters. No guessing:
+         * each line is a statement about a measured number, and when the numbers say "fine" this says
+         * so instead of inventing a cause.
+         */
+        fun diagnosis(): String = when {
+            pairingNote.isNotEmpty() -> pairingNote
+            state.startsWith("NATIVE CORE") || state == "NO AUDIO" -> audioNote
+            peerOnline && pairing == "paired" -> "paired and exchanging frames"
+            syncHits != null && syncHits > 0 && (framesReceived ?: 0L) == 0L ->
+                "bursts are arriving (sync found $syncHits times) but none of them decodes: the two " +
+                    "ends are most likely on different profiles or session ids, or the level is wrong. " +
+                    "Set the SAME profile number and session id on both ends."
+            (inDbfs ?: -120.0) < -70.0 ->
+                "the microphone hears almost nothing (${f(inDbfs)} dBFS): check the microphone, the " +
+                    "phone's volume, the distance, and that nothing is muting the speaker."
+            else ->
+                "listening: input ${f(inDbfs)} dBFS, no burst decoded yet (nothing seen " +
+                    "${n(rxNoFrame)} times). Check both ends use the same profile, session id and " +
+                    "passphrase, and press Start on both."
+        }
     }
 
     /** Calibration report -> rows for the UI, straight out of ni_abi_calibrate's JSON. */

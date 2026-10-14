@@ -677,6 +677,8 @@ int cmd_linksim(const Opts& o) {
   lo.multipath = !o.flag("no-multipath");
   lo.adapt = o.flag("adapt");  // opt-in, see LinkSimOptions::adapt
   lo.pace_tx = !o.flag("unpaced");  // --unpaced: drain the render queue as fast as we can compute
+  lo.device_ms = (int)o.num("device-ms", 0);        // model the sound card's own queue
+  lo.device_report = !o.flag("no-device-report");   // do the endpoints get told about it?
   for (int t = 0; t < lo.trials; t++) {
     LinkSimOptions l2 = lo;
     l2.seed = lo.seed + (uint64_t)t * 101u;
@@ -810,10 +812,15 @@ struct Pump {
       recv->step(*t);
       size_t want = (size_t)(fs / 1000.0) * blk_ms + 1;
       buf.resize(want);
+      // What the giver's speaker plays, the receiver's microphone hears, and vice versa. The two
+      // vectors are named for the journey the samples make (g2r = giver to receiver). They used to be
+      // filled from the opposite endpoint and then fed back to the endpoint that produced them, so
+      // each node heard its own echo, nothing ever crossed, and `ni demo` could not pair by
+      // construction - see reports/RESULTS.md defect 32.
       int g = giver->pull_playback(&buf[0], want);
-      if (g > 0) r2g.insert(r2g.end(), buf.begin(), buf.begin() + g);
-      g = recv->pull_playback(&buf[0], want);
       if (g > 0) g2r.insert(g2r.end(), buf.begin(), buf.begin() + g);
+      g = recv->pull_playback(&buf[0], want);
+      if (g > 0) r2g.insert(r2g.end(), buf.begin(), buf.begin() + g);
       if (!g2r.empty()) {
         recv->feed_capture(&g2r[0], g2r.size());
         g2r.clear();
@@ -889,7 +896,10 @@ struct Pump {
 int cmd_demo(const Opts& o) {
   bool bad = false;
   double fs = o.num("fs", 48000);
-  int pid = profile_arg(o, 5, &bad);
+  // 10 = FD-LOW-DBPSK, the profile every measured run has paired and delivered on. The old default
+  // was 5 (QAM16-WIDE), which the self-test scores 0/8 in the modelled room, so the one command
+  // documented as the end-to-end test was configured to fail before it started.
+  int pid = profile_arg(o, 10, &bad);
   if (bad) return bad_profile(o);
   std::string url = o.get("url", "http://api.github.com/zen");
   int port = (int)o.num("proxy-port", 8471);
@@ -917,6 +927,11 @@ int cmd_demo(const Opts& o) {
   gc.ch = channel_from(o);
   gc.ch.snr_db = o.num("snr", 26);
   gc.ch.seed = 4242;
+  // The demo is the "does the whole path work" command, so its default room is the one the link can
+  // actually cross: the modelled multipath defeats every profile tested (see reports/RESULTS.md,
+  // gate C), so it is off unless --multipath asks for it. `--no-multipath` stays valid and just
+  // repeats the default.
+  gc.ch.multipath = o.flag("multipath") && !o.flag("no-multipath");
   NodeConfig vc = gc;
   vc.role = NI_ROLE_RECEIVER;
   vc.is_master = false;
@@ -956,6 +971,10 @@ int cmd_demo(const Opts& o) {
     fprintf(stderr, "pairing did not complete: giver=%s receiver=%s\n",
             giver.link()->pairing() ? giver.link()->pairing()->state_name() : "-",
             recv.link()->pairing() ? recv.link()->pairing()->state_name() : "-");
+    // The states alone never said which end was deaf. These two documents carry the burst counters,
+    // the learned input level and the sync/CRC failures, which is what a field test needs.
+    fprintf(stderr, "giver    : %s\n", giver.status_json().c_str());
+    fprintf(stderr, "receiver : %s\n", recv.status_json().c_str());
     return 2;
   }
   printf("  [t=%5lld ms] paired. SAS on both ends: %s\n", (long long)t,
@@ -967,13 +986,13 @@ int cmd_demo(const Opts& o) {
   fflush(stdout);
   std::vector<uint8_t> proxied, direct;
   int s1 = p2.run(&proxied, "curl",
-                  {"-sS", "-m", "900", "-x", "http://127.0.0.1:" + std::to_string(port), url,
+                  {"-sS", "-L", "-m", "900", "-x", "http://127.0.0.1:" + std::to_string(port), url,
                    "-D", "-", "-o", "/dev/stdout"},
                   budget);
   printf("  [t=%5lld ms] curl via proxy exit=%d, %zu bytes received\n", (long long)t, s1,
          proxied.size());
   fflush(stdout);
-  int s2 = p2.run(&direct, "curl", {"-sS", "-m", "900", url, "-D", "-", "-o", "/dev/stdout"},
+  int s2 = p2.run(&direct, "curl", {"-sS", "-L", "-m", "900", url, "-D", "-", "-o", "/dev/stdout"},
                   budget);
   printf("  [t=%5lld ms] curl direct      exit=%d, %zu bytes received\n", (long long)t, s2,
          direct.size());
@@ -984,10 +1003,20 @@ int cmd_demo(const Opts& o) {
   printf("  direct        bytes : %zu   sha256 %s\n", direct.size(),
          sha_hex(direct.data(), direct.size()).c_str());
   bool match = !proxied.empty() && proxied == direct;
-  printf("  comparison          : %s\n",
-         match ? "IDENTICAL - the bytes that arrived through the acoustic link are the same "
-                 "bytes the origin sent"
-               : "DIFFERENT (see report below)");
+  // A control leg that returned nothing (redirect the client would not follow, or a host with no
+  // internet of its own) is not evidence about the acoustic path, and calling that "DIFFERENT" made a
+  // working transfer look broken. Say which of the three things this is.
+  if (direct.empty())
+    printf("  comparison          : INCONCLUSIVE - %zu bytes came through the acoustic link, but the\n"
+           "                        direct control fetch returned nothing on this host (exit=%d), so\n"
+           "                        there is nothing to compare against. Re-run with a URL this host\n"
+           "                        can fetch directly if you want the byte-for-byte check.\n",
+           proxied.size(), s2);
+  else
+    printf("  comparison          : %s\n",
+           match ? "IDENTICAL - the bytes that arrived through the acoustic link are the same "
+                   "bytes the origin sent"
+                 : "DIFFERENT (see report below)");
   printf("\n  giver report   : %s\n", giver.export_report_json(t).c_str());
   printf("  receiver report: %s\n", recv.export_report_json(t).c_str());
   std::string out = o.get("json");
@@ -1044,7 +1073,10 @@ int usage() {
       "\n"
       "channel options (selftest, bench, linksim, demo): --snr --distance --sro --speaker\n"
       "  --mic --volume --no-agc --no-multipath --seed\n"
+      "  demo:   --profile --snr --distance --multipath (off by default) --secret --url --budget-ms\n"
       "  linksim: --bytes --trials --max-ms --burst-loss --sro --profile --snr --distance\n"
+      "           --device-ms N   model a sound-card queue of N ms (0 = none, the default)\n"
+      "           --no-device-report   the queue exists but the endpoint is never told about it\n"
       "           --no-agc --no-multipath --fast-agc --adapt --unpaced --json\n");
   return 0;
 }

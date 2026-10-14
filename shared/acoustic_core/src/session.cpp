@@ -42,6 +42,10 @@ int AcousticLink::start() {
   // simulator hit this because it started each node twice, and every pairing then failed its HMAC
   // check - the two ends derived keys from different nonce pairs.
   if (running_) return NI_OK;
+  // The peer can ask us to change profile; the link is the only thing that owns a modem, so it is the
+  // link that applies the change. Without this hook the far end's ARQ changed its bookkeeping while
+  // its modem kept rendering and decoding the old profile.
+  arq_.on_profile_request = [this](int pid) { apply_profile(pid); };
   modem_ = new Modem(opt_.modem);
   if (!modem_->ok()) {
     last_error_ = modem_->error();
@@ -96,6 +100,32 @@ double AcousticLink::burst_airtime_ms(int payload_bytes) const {
   return p.duration_ms;
 }
 
+// Move our own modem to `pid`. Only ever called when the peer is known to be moving too: either
+// because the peer asked us (on_profile_request) or because it acknowledged our request.
+int AcousticLink::apply_profile(int pid) {
+  if (!modem_) return NI_ERR_STATE;
+  ModemConfig c = opt_.modem;
+  c.profile_id = pid;
+  Modem* m = new Modem(c);
+  if (!m->ok()) {
+    std::string e = m->error();
+    delete m;
+    last_error_ = "cannot switch to profile " + std::to_string(pid) + ": " + e;
+    return NI_ERR_UNSUPPORTED;
+  }
+  delete modem_;
+  modem_ = m;
+  opt_.modem.profile_id = pid;          // the burst descriptor now carries the new modulation id
+  opt_.arq.mod_id = (uint8_t)pid;
+  arq_.config_mut().mod_id = (uint8_t)pid;
+  arq_.config_mut().max_payload =
+      std::min(m->max_payload() - 40, opt_.arq.max_payload > 0 ? opt_.arq.max_payload : 228);
+  bursts_since_adapt_ = 0;
+  pending_profile_ = -1;
+  last_adapt_reason_ = "switched to " + std::string(ni_profile(pid).name);
+  return NI_OK;
+}
+
 int AcousticLink::begin_pairing(const std::string& secret) {
   if (!running_) return NI_ERR_STATE;
   PairingConfig pc;
@@ -121,23 +151,26 @@ int AcousticLink::send_file(uint16_t stream, const uint8_t* data, size_t n) {
 
 int AcousticLink::request_profile(int pid) {
   if (!modem_) return NI_ERR_STATE;
+  // Validate the target before asking anyone to move: a request we cannot honour locally would leave
+  // the peer on a profile we are unable to use.
+  {
+    ModemConfig probe_cfg = opt_.modem;
+    probe_cfg.profile_id = pid;
+    Modem probe(probe_cfg);
+    if (!probe.ok()) {
+      last_error_ = "cannot switch to profile " + std::to_string(pid) + ": " + probe.error();
+      return NI_ERR_UNSUPPORTED;
+    }
+  }
   int rc = arq_.request_profile(pid);
   if (rc != NI_OK) return rc;
-  ModemConfig c = opt_.modem;
-  c.profile_id = pid;
-  Modem* m = new Modem(c);
-  if (!m->ok()) {
-    std::string e = m->error();
-    delete m;
-    last_error_ = "cannot switch to profile " + std::to_string(pid) + ": " + e;
-    return NI_ERR_UNSUPPORTED;
-  }
-  delete modem_;
-  modem_ = m;
-  arq_.config_mut().mod_id = (uint8_t)pid;
-  arq_.config_mut().max_payload =
-      std::min(m->max_payload() - 40, opt_.arq.max_payload > 0 ? opt_.arq.max_payload : 228);
-  bursts_since_adapt_ = 0;
+  // NOT applied here. The old code rebuilt our modem on the spot and merely asked the peer to do the
+  // same; when that request was lost - and it is a best-effort frame under loss - this end was on a
+  // new profile while the peer stayed on the old one, which is deafness with no recovery path. The
+  // switch now happens in tick(), and only after the peer acknowledges (see apply_profile).
+  pending_profile_ = pid;
+  pending_profile_ms_ = now_ms_;
+  last_adapt_reason_ = "requested " + std::to_string(pid) + ", waiting for the peer's ack";
   return NI_OK;
 }
 
@@ -173,6 +206,7 @@ int AcousticLink::feed_pcm(const float* x, size_t n) {
   double e2 = 0.0;
   for (size_t i = 0; i < n; i++) e2 += (double)x[i] * (double)x[i];
   double new_rms = sqrt(e2 / (double)n);
+  in_dbfs_ = 20.0 * log10(new_rms > 1e-9 ? new_rms : 1e-9);
   if (new_rms < noise_rms_)
     noise_rms_ = 0.2 * noise_rms_ + 0.8 * new_rms;   // noise floor falls fast
   else
@@ -199,6 +233,7 @@ int AcousticLink::feed_pcm(const float* x, size_t n) {
     // off a burst that is still arriving.
     mid_burst_ = true;
     burst_hold_ms_ = now_ms_;
+    c_.sync_hits++;   // a burst is there; it just is not readable (yet, or at this profile)
     size_t head = r.start_pos > burst_start_ ? r.start_pos : burst_start_;
     if (head > 0 && head <= cap_.size()) {
       cap_.erase(cap_.begin(), cap_.begin() + head);
@@ -247,7 +282,9 @@ void AcousticLink::handle_pdu(const uint8_t* pdu, size_t n, const PhyStats& st, 
   int16_t snr = (int16_t)lround(st.snr_db * 256.0);
   arq_.set_snr(snr, (uint8_t)std::min(255.0, std::max(0.0, st.snr_db * 12.0)));
   // adaptive modulation: evaluate every few bursts, act on the decision
-  if (adaptive_ && bursts_since_adapt_ >= 6) {
+  // Never before the link is up: the pairing handshake must not be disturbed by either end deciding
+  // to change profile in the middle of it.
+  if (adaptive_ && arq_.paired() && arq_.link_up() && bursts_since_adapt_ >= 6) {
     bursts_since_adapt_ = 0;
     double tot = (double)(c_.rx_bursts + c_.rx_crc_fail);
     double success = tot > 0 ? (double)c_.rx_bursts / tot : 1.0;
@@ -339,6 +376,18 @@ int AcousticLink::tick(int64_t now_ms) {
   // is handed burst after burst, the TDD turn-taking no longer matches the wire, and the RTT and
   // throughput figures measure how fast the host can render rather than how fast sound travels.
   bool playing = !txq_.empty() || tx_backlog_ > 0;
+  // A profile change is committed only when the peer has confirmed it, and it is abandoned if that
+  // confirmation never arrives: a lost request then costs a few seconds instead of the session. Both
+  // ends end up on the same profile, or both stay on the old one.
+  if (pending_profile_ >= 0) {
+    if (arq_.take_profile_ack()) {
+      apply_profile(pending_profile_);
+    } else if (now_ms - pending_profile_ms_ > 5000) {
+      arq_.cancel_profile_request();
+      last_adapt_reason_ = "profile request timed out; staying on the current profile";
+      pending_profile_ = -1;
+    }
+  }
   arq_.on_timer(now_ms);
 
   bool may_tx = false;

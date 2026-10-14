@@ -128,6 +128,18 @@ class NoiseService : VpnService(), AudioEngine.Sink {
         )
         startForeground(4242, buildNotification("starting"))
         acquireWakeLock()
+        // Refuse to pretend: with no passphrase the native core never even starts pairing, so the app
+        // would sit on "no peer" forever and the user would have nothing to go on. Say it instead.
+        // (This check has to come AFTER startForeground: on API 26+ a foreground service that returns
+        // without calling startForeground is killed by the platform, which would turn a clear message
+        // into a crash.)
+        if (cfg.pairingSecret.length < 8) {
+            publish("{\"state_name\":\"NO PASSPHRASE\",\"pairing_note\":\"the passphrase is ${cfg.pairingSecret.length} " +
+                "characters. Both ends must be given the SAME passphrase of 8+ characters, or pairing is " +
+                "never attempted at all.\",\"audio_note\":\"nothing was started and nothing was transmitted\"}")
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         val c = try {
             NoiseCore(cfg)
@@ -163,6 +175,10 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             // thread at a few kHz so the audio callbacks never block on protocol work.
             while (alive.get()) {
                 try {
+                    // Read the sound card before stepping the link: the queue depth is what tells the
+                    // half-duplex scheduler when the previous burst really finished playing.
+                    val queue = audio?.queuedFrames() ?: -1L
+                    if (queue >= 0) core?.setTxBacklog(queue)
                     core?.step(System.currentTimeMillis())
                 } catch (e: Exception) {
                     Log.e(TAG, "step failed", e)

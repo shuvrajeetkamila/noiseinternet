@@ -99,6 +99,16 @@ JNIEXPORT jint JNICALL Java_com_noiseinternet_core_NoiseCore_step(JNIEnv* env, j
 }
 
 // Microphone -> engine. Returns frames consumed.
+// How much audio the AudioTrack still has to play. Without this the native link believes a burst is
+// finished the moment the samples are handed to the platform, which is up to a buffer's worth of time
+// before the sound has actually left the speaker - and that is the clock the half-duplex turn-taking
+// is built on.
+JNIEXPORT jint JNICALL Java_com_noiseinternet_core_NoiseCore_setTxBacklog(JNIEnv* env, jobject self,
+                                                                        jlong frames) {
+  if (frames < 0) frames = 0;
+  return ni_abi_set_tx_backlog(node_of(env, self), (unsigned)frames);
+}
+
 JNIEXPORT jint JNICALL Java_com_noiseinternet_core_NoiseCore_feedPcm(JNIEnv* env, jobject self,
                                                                       jfloatArray pcm, jint n) {
   if (!pcm || n <= 0) return 0;

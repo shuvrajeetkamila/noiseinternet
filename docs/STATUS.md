@@ -96,11 +96,16 @@ proxy leg) does not pair either (defect 21).
 *Not proved:* anything over real speakers and microphones; a multi-kB transfer on every profile; a transfer
 that survives multipath.
 
-### 7. Local HTTP/CONNECT proxy — **not proved**
+### 7. Local HTTP/CONNECT proxy — **the HTTP leg is proved in the model; CONNECT is not**
 `proxy.cpp` implements a loopback-only proxy (127.0.0.1, `Proxy-Authorization: Noise <token>`), request
-size caps, per-stream reassembly, stream routing, and a link-test stream, and `ni link-test` exists to
-drive it. None of that was ever carried across a working acoustic session, because milestone 6 does not
-yet complete. Verdict: **built, not tested end-to-end**.
+size caps, per-stream reassembly, stream routing, and a link-test stream. The HTTP leg is now carried
+across a working acoustic session and has been measured: `ni demo` pairs, the giver fetches a real URL, and
+`curl` receives the origin's response through the receiver's proxy - 108 bytes with a recorded sha256
+(`reports/RESULTS.md` §4.7). That took finding two defects that had nothing to do with the proxy (32: the
+demo fed each node its own echo; 33: adaptation could move one endpoint's profile and not the other's).
+Still not done: the **CONNECT/TCP** path has never been exercised (`connect_ok 0` in the giver's report),
+any real browsing session over this link, and the Android tunnel's TCP story. Verdict: **the HTTP leg is
+proved in the model; TCP over the tunnel is not proved anywhere**.
 
 ### 8. Echo cancellation and full duplex — **not proved**
 `NlmsAec` (1024 taps, NLMS) plus two FDD profiles exist and `ni duplex` runs them against the modelled
@@ -162,7 +167,7 @@ question, this table is authoritative.
 | B | PHY transmits arbitrary data over the modelled device chain and it decodes | **PARTIAL** | WAV round-trip sha256-equal; per-profile 7/8 … 0/8; FSK and QAM16/64 fail; no over-the-air data (no hardware) |
 | C | Reliable session (FEC + ARQ + acks + pairing) carries a multi-kB message across the link | **PARTIAL** | **2 048 bytes each way, both directions, SHA-256 verified, in 30.3 s = 540 bps (67.5 B/s) on FD-HIGH-DBPSK and 546.9 bps on DBPSK-MID, 3 trials of 3 in both cases** over the modelled room at 20-26 dB measured SNR (`reports/linksim.csv`, rows `fix25-*`; `RESULTS.md` §4.6 has the root cause of the earlier `delivered 0`, defects 24-25 the use-after-free that was hiding in this table's reassembly path). Still failing: 2 kB on the 82-byte-burst profile and under multipath complete in only 1 trial of 3, pairing does not complete on FD-LOW at 5 % burst loss (defect 26), ~10 % of frames go to a receiver-side distortion floor (defect 20), and a lost frame wedges the message silently (defect 22). Never attempted over real transducers. |
 | D | Security: AEAD, replay protection, no plaintext on a required-crypto link, no public exposure | **PARTIAL** | unit-proven refusal/lockout/replay cases; loopback-only bind is source-verified, not penetration-tested |
-| E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **FAIL** | `ni demo` (proxy on 127.0.0.1 + `curl` through it, giver fetches a real URL) runs but never pairs: `giver=wait-response receiver=wait-challenge` on FD-HIGH at three distances, with and without TX pacing - defect 21, a defect in that harness, since `ni linksim` pairs on the same build and profile. No proxied byte has been counted anywhere; no claim of internet sharing is made. |
+| E | Usable internet: HTTP/CONNECT proxy tunnelled over the acoustic session | **PARTIAL** | **The HTTP leg is now verified end to end in the model**: `ni demo` pairs (matching SAS on both ends) and a real `http://api.github.com/zen` response - 108 bytes, sha256 recorded in `reports/RESULTS.md` §4.7 - is fetched by the giver over its own socket and delivered to `curl` through the receiver's local proxy over the acoustic session. That was impossible until defect 32 (the demo's audio pump fed each node its own echo) and defect 33 (adaptation enabled by default, switching one endpoint and not the other) were found and fixed, both in the same session as the first real field report. **Not verified:** the CONNECT/TCP path (`connect_ok 0` - it has never been exercised), any real internet session over that link, and the Android tunnel, which still carries UDP and DNS only. Gate E is PARTIAL rather than FAIL because a proxied byte has now been counted and hash-recorded; it is not PASS because 'a browser on the receiver loads a page' remains untested everywhere, and no usable-throughput claim of any kind is made. |
 | F | Hardware in the loop: real speaker → air → real microphone on two devices | **NOT TESTED** | `ni audit` → 0 audio devices; no capture or render ever ran here |
 | G | Platform artifacts: installable APK and Windows EXE, VPN tunnel on device | **PARTIAL** | CI builds both from this branch and publishes four assets on the `ci-build` pre-release: <https://github.com/shuvrajeetkamila/noiseinternet/releases/tag/ci-build> - the debug APK (NDK-r26 core for arm64-v8a + x86_64 inside, keystore created and destroyed on the runner), a **standalone** `NoiseInternet.exe` that is now the **windowed** app (role radios, WASAPI-fed device lists, profile, session, passphrase, a read-only match-code field, Start/Stop/Switch role/Calibrate/Link test/Internet test, measured status panel; `/MT` confirmed from the exe's own import table rather than from the build option), `NoiseInternet-console.exe` for the terminal, a Windows bundle zip (`ni.exe`, `README-RUN.md`, `BUILD-INFO.txt`, `ui-check.txt`, unmodified CRT DLLs under `redist/`), and a combined android+windows zip. The packaging step **runs** the window (`--ui-check`, 60 s bound) and refuses to publish if it does not come back with 0, then ships the inventory it wrote: the current bundle records `step 3: ui-check PASSED`, **26 controls** with classes, sizes, texts and enabled states, 16 modulation profiles, and 0 audio endpoints (the truth about a build agent, and the reason no acoustic claim comes with it). `file` on the published exe says `PE32+ executable (GUI) x86-64`, and its import list is `GDI32.dll KERNEL32.dll ole32.dll SHELL32.dll USER32.dll WS2_32.dll` - a real window, still standalone. All four assets are rebuilt and republished on every green push, with sha256 generated on the runner, so the release body is the authority and `artifacts/README.md` explains the design. **Still not done: installing or running either on a device, the VpnService tunnel, and release signing.** Tests are 8/8 on both platforms - the Windows job is what caught a use-after-free that Linux masked (defects 24-25) |
 | H | Documentation, reproducible benchmarks (CSV + JSON), automated tests separated from physical tests | **PARTIAL** | `protocol/modulation_profiles.json` now exists and is generated from the C++ table by `ni profiles --json`, so the spec file and the code agree (16 profiles); `reports/bench_sweep.csv`/`.json` and `reports/raw/selftest_snr25_streaming.txt` were re-run after the channel-model rework (defect 19) so the published PHY numbers match the code in this tree. Otherwise this file, `RESULTS.md`, `raw/` logs, `reports/bench_sweep.csv` + `.json` (315 rows from `ni bench --csv/--json`: medians over trials, a `failed_trials` count, and an `evidence_level` field stating in the file that this is a simulated channel), `scripts/raw_to_csv.py`, 8 ctest targets with 3 590 assertions all green, and `tests/physical/` (OTA protocol + runner, whose only exercised path here is its refusal to write a row without a recorder). Still missing: one-command benchmark regeneration and CI wiring. |
@@ -199,9 +204,16 @@ python3 scripts/raw_to_csv.py                                      # regenerates
 
 ## Known gaps and next actions, in the order that unblocks the most
 
-0. **Gate G follow-ups.** Install the CI APK on a phone and run the CI EXE on a Windows box with a
-   speaker and a microphone: that is the only thing left standing between the current artifacts and
-   gates E/F. `packaging/windows/README-RUN.md` is the procedure, and the first thing to try in the window
+0. **Gate G follow-ups, updated by the first field report.** Install the CI APK on a phone and run the CI
+   EXE on a Windows box with a speaker and a microphone: that is still the only thing standing between the
+   current artifacts and gates E/F, and the report from the first attempt ("it never paired, from both the
+   exe and the apk") produced four fixes that all sit in the path a first run takes - defects 32-35. The
+   things to check first on a re-run, in order: (a) does the passphrase field have the *same* 8+ characters
+   on both ends (the apps now refuse to start otherwise, with the reason on screen); (b) the same profile
+   number and session id on both - both apps now start on profile 10 / session id 7; (c) the one-line
+   **why** on each status panel, which now distinguishes "the microphone hears nothing", "bursts arrive but
+   do not decode" and "no passphrase" from each other. The old advice about device ids in
+   `packaging/windows/README-RUN.md` still applies. `packaging/windows/README-RUN.md` is the procedure, and the first thing to try in the window
    is **Start** on both ends followed by comparing the four-word **match code**, which now appears on both
    screens (the snapshot carries the SAS; before this only the diagnostics JSON did, so no front end could
    display it). The cheap code task here is defect 27 - a proxy-token field in the Android config, without

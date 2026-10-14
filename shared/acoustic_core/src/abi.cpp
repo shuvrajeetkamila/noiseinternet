@@ -193,6 +193,12 @@ int ni_abi_stop(NiNode* n) {
   n->node->stop();
   return NI_OK;
 }
+int ni_abi_set_tx_backlog(NiNode* n, unsigned frames) {
+  if (!n || !n->node) return NI_ERR_PARAM;
+  n->node->set_tx_backlog((size_t)frames);
+  return NI_OK;
+}
+
 int ni_abi_step(NiNode* n, int64_t now_ms) {
   if (!n) return NI_ERR_PARAM;
   return n->node->step(now_ms);

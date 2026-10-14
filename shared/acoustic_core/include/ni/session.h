@@ -115,6 +115,9 @@ class ArqEngine {
   // callbacks the owning session installs
   std::function<int(const Frame&, int64_t)> on_pair;
   std::function<int(const NetInfo&)> on_netinfo;
+  // The peer asked us to change modulation profile. The LINK installs this (it owns the modem); the
+  // ARQ only knows that a request arrived. Applying it here is what keeps both ends on one profile.
+  std::function<void(int)> on_profile_request;
   std::function<int(const Frame&, int64_t)> on_cal;
   void set_snr(int16_t snr_q8, uint8_t quality) { last_snr_q8_ = snr_q8; last_quality_ = quality; }
   void flag_nack() { nack_pending_ = true; ack_dirty_ = true; }
@@ -152,6 +155,15 @@ class ArqEngine {
   ArqStats& stats_mut() { return st_; }
   // Request the peer to change profile (returns a CTRL frame payload).
   int request_profile(int profile_id);
+  // True once, after the peer acknowledged our profile request. The link waits for this before it
+  // moves its own modem, so a lost request costs nothing instead of the whole session.
+  bool take_profile_ack() {
+    bool a = profile_acked_;
+    profile_acked_ = false;
+    return a;
+  }
+  void cancel_profile_request() { profile_req_active_ = false; }
+  bool profile_request_in_flight() const { return profile_req_active_; }
   int active_profile() const { return cfg_.mod_id; }
   // Time until the next event the caller must service (ms). -1 = no timer.
   int next_event_ms(int64_t now_ms) const;
@@ -203,6 +215,14 @@ class ArqEngine {
   int64_t bytes_up_win_start_ = 0;
   uint64_t bytes_up_win_ = 0;
   uint16_t ctrl_profile_ = 0xFFFF;
+  // A profile change has to be a two-sided event. The endpoint that asks for one must not switch its
+  // own modem before the peer has confirmed, or the two ends can end up on different profiles with no
+  // way back - which is what used to happen, on both apps, because adaptation was enabled by default.
+  // The request travels as a reliable CTRL frame; `profile_acked_` is set when that frame is
+  // acknowledged, and AcousticLink switches its own modem only then. See defect 33.
+  bool profile_req_active_ = false;
+  bool profile_acked_ = false;
+  int64_t profile_req_ms_ = 0;
   bool profile_req_pending_ = false;
   uint32_t tx_ctl_ = 0;
   std::vector<uint32_t> burst_frames_;
@@ -281,6 +301,9 @@ class AcousticLink {
   int64_t peer_seen_ms() const { return peer_seen_ms_; }
   // Request the peer to switch modulation (and apply locally once acked).
   int request_profile(int pid);
+  // Commit a profile change locally. Public because the ARQ's peer-request hook calls it; both
+  // directions of the negotiation end up here, and neither end moves without the other.
+  int apply_profile(int pid);
   bool adaptive() const { return adaptive_; }
   void set_adaptive(bool on) { adaptive_ = on; }
   // Pairing access for the UI.
@@ -290,11 +313,23 @@ class AcousticLink {
   struct Counters {
     uint64_t rx_bursts = 0, tx_bursts = 0, rx_crc_fail = 0, rx_no_frame = 0, dup = 0;
     uint64_t tx_render_fail = 0;  // bursts the modem refused to render (see clamp_burst_to_phy)
+    // A burst whose sync sequence was found but which could not be read: the single most useful
+    // number when "it never pairs" (see this count next to rx_bursts and rx_no_frame).
+    //   sync_hits > 0, rx_bursts == 0  -> signal is arriving, nothing decodes (wrong profile on one
+    //                                    end, or the level is too high/low)
+    //   sync_hits == 0, rx_no_frame    -> the receiver hears no burst at all (route, volume, mic)
+    uint64_t sync_hits = 0;
   };
   // UI hooks
   std::function<void(const PhyStats&)> on_stats_;
   std::function<void(const RxResult&)> on_phy_;
   const Counters& counters() const { return c_; }
+
+  // Newest capture block's level, dBFS, as measured in feed_pcm() before the squelch. This is the
+  // "is the microphone hearing anything at all" number a field test needs, and it is measured on
+  // every block rather than only on decoded bursts - the whole point is to have an answer when
+  // nothing decodes.
+  double input_dbfs() const { return in_dbfs_; }
 
   void move_state(int s, const std::string& why);
 
@@ -320,6 +355,7 @@ class AcousticLink {
   std::vector<float> aec_ref_;  // our own last played signal (FDD)
   size_t cap_read_ = 0;
   double noise_rms_ = 1e-4;  // learned receive noise floor, for the detector squelch
+  double in_dbfs_ = -120.0;  // newest capture block level (see input_dbfs)
   bool mid_burst_ = false;   // a burst is arriving: keep the detector running every callback
   int64_t burst_hold_ms_ = 0;
   // Index inside cap_ where the burst we are waiting for begins. Once the detector has found the
@@ -330,8 +366,15 @@ class AcousticLink {
   bool running_ = false;
   std::string last_error_;
   int64_t listen_until_ms_ = 0, last_tx_end_ms_ = 0, peer_seen_ms_ = 0, last_peer_burst_ms_ = 0;
+  int pending_profile_ = -1;            // requested, waiting for the peer's ack (see apply_profile)
+  int64_t pending_profile_ms_ = 0;
   int64_t tx_backlog_ = 0;  // samples the transport still owes the speaker (set_tx_backlog)
-  bool adaptive_ = true;
+  // Off by default, and that default is the fix for defect 33: adaptation changes the modulation
+  // profile, and the apps had it enabled with no way for the two ends to agree - one end's estimator
+  // could therefore move itself and leave the peer behind, permanently. It is opt-in now
+  // (LinkSimOptions::adapt, or set_adaptive by a caller that knows what it is doing), and even then the
+  // switch is only committed after the peer acknowledges it.
+  bool adaptive_ = false;
   int64_t next_tick_ms_ = 0;
   double rtt_display_ = 0.0, erle_ = 0.0;
   Counters c_;
@@ -390,6 +433,16 @@ struct LinkSimOptions {
   // is much faster and was the original default, but it lets an endpoint speak over the peer's
   // reply and it inflates every timing figure. Measured both ways in reports/RESULTS.md.
   bool pace_tx = true;
+  // The sound card's own queue: `device_ms` of audio sits between the moment an endpoint hands
+  // samples to its audio backend and the moment they come out of the speaker / are handed to the
+  // peer. With device_ms = 0 nothing changes (the model keeps its original 25 ms + propagation
+  // floor). This exists because the apps have a real queue and the model did not, so a turn-taking
+  // bug that only appears against a real device could not be reproduced here at all.
+  int device_ms = 0;
+  // Whether each endpoint is TOLD how much of its audio is still in flight, the way an app reading
+  // GetCurrentPadding()/playbackHeadPosition() can tell its own link. device_report = false models
+  // the apps as they were before this was wired up: the queue exists, the transmitter does not know.
+  bool device_report = true;
   int max_ms = 60000;
 };
 LinkSimResult ni_link_sim(const LinkSimOptions& o);

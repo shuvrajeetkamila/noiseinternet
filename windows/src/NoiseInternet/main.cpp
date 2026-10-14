@@ -36,6 +36,7 @@ struct App {
   Node* node = nullptr;
   WasapiEngine audio;
   bool using_wav = false;      // --wav-in/--wav-out development mode: file transport, NOT acoustic
+  bool allow_unpaired = false; // --allow-unpaired: run TX/RX without a passphrase, explicitly
   std::string wav_in, wav_out;
   std::thread pump, reader;
 };
@@ -58,8 +59,14 @@ void print_status(App& app) {
   printf("c runtime         : static (/MT) - standalone exe, no CRT DLLs needed\n");
 #endif
   printf("audio devices     : mic=%s  speaker=%s\n", s.input_device.c_str(), s.output_device.c_str());
-  printf("peer              : %s (last heard %lld ms ago)\n", s.peer_online ? "ONLINE" : "offline",
-         (long long)s.peer_seen_ms);
+  printf("peer              : %s (last heard %lld ms ago)   pairing %s\n",
+         s.peer_online ? "ONLINE" : "offline", (long long)s.peer_seen_ms, s.pairing.c_str());
+  printf("match code        : %s   <- must read identically on the other device\n",
+         s.sas.empty() ? "(not paired yet)" : s.sas.c_str());
+  printf("input level       : %.1f dBFS   bursts seen %llu   decoded %llu   empty callbacks %llu\n",
+         s.in_dbfs, (unsigned long long)s.sync_hits, (unsigned long long)s.frames_received,
+         (unsigned long long)s.rx_no_frame);
+  if (!s.pairing_note.empty()) printf("PAIRING NOTE      : %s\n", s.pairing_note.c_str());
   printf("measured SNR      : %.2f dB   RSSI %.1f dBFS   noise %.1f dBFS\n", s.snr_db, s.rssi_dbfs,
          s.noise_dbfs);
   printf("EVM               : %.2f %%\n", s.evec_pct);
@@ -144,6 +151,8 @@ void usage() {
       "\n"
       "  NoiseInternet.exe [--giver|--receiver] [--mic <endpoint-id>] [--spk <endpoint-id>]\n"
       "                    [--profile N] [--fs 48000] [--secret PASSPHRASE] [--session N]\n"
+      "                    [--proxy-token T] [--allow-unpaired]   (a passphrase is required to pair:\n"
+      "                    8+ characters, identical on both ends)\n"
       "                    [--proxy-port 8471] [--proxy-token TOKEN] [--duplex] [--list-devices]\n"
       "                    [--wav-in f.wav --wav-out g.wav]   (development: file transport, NOT\n"
       "                     an acoustic test; the status screen marks it as such)\n"
@@ -184,7 +193,12 @@ int main(int argc, char** argv) {
   App app;
   app.cfg.role = NI_ROLE_GIVER;
   app.cfg.is_master = true;
-  app.cfg.pairing_secret = "change-me";
+  // Was the literal "change-me": a hard-coded passphrase that made --secret look optional, so a user
+  // could run this end with one secret and the phone with another and never know why nothing paired.
+  // Empty now, and the startup check below refuses to pretend it can pair without one.
+  app.cfg.pairing_secret = "";
+  app.cfg.profile_id = 10;   // FD-LOW-DBPSK: the profile every measured end-to-end run completes on
+  app.cfg.session_id = 7;    // the same default the windowed app and the phone use
   app.cfg.name = "win";
 
   for (int i = 1; i < argc; ++i) {
@@ -215,6 +229,8 @@ int main(int argc, char** argv) {
     } else if (a == "--fs") {
       if (next(v)) return 2;
       app.cfg.fs = atof(v.c_str());
+    } else if (a == "--allow-unpaired") {
+      app.allow_unpaired = true;
     } else if (a == "--secret") {
       if (next(v)) return 2;
       app.cfg.pairing_secret = v;
@@ -252,6 +268,22 @@ int main(int argc, char** argv) {
       usage();
       return 2;
     }
+  }
+
+  if (app.cfg.pairing_secret.size() < 8) {
+    printf("\nNO PASSPHRASE: %s\n",
+           app.cfg.pairing_secret.empty()
+               ? "the passphrase is empty. Pairing is never attempted without one, so this end cannot "
+                 "pair."
+               : "the passphrase is under 8 characters. It will pair, but it is weak.");
+    printf("Both ends need the SAME passphrase: this exe takes --secret PASSPHRASE and the Android app "
+           "has a passphrase field.\n");
+    if (app.cfg.pairing_secret.empty() && !app.allow_unpaired) {
+      printf("Refusing to start: nothing would be measurable. Pass --secret 'a-long-passphrase' (and "
+             "the same one on the phone), or --allow-unpaired to run this end without pairing.\n\n");
+      return 2;
+    }
+    printf("\n");
   }
 
   // The receiver serves the local proxy; the giver is the one that can reach the internet.

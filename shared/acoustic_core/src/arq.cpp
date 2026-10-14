@@ -382,6 +382,12 @@ void ArqEngine::apply_report(uint32_t next_seq, uint32_t bitmap, int64_t now_ms)
       acked = true;
     }
     if (!acked) continue;
+    if (it.f.type == NI_FT_CTRL && it.f.payload_len >= 4 && ni_rd16(it.f.payload) == 1) {
+      // our own SET_PROFILE was acknowledged: the peer has switched (or is about to), so the link
+      // may now move its own modem without splitting the two ends across profiles.
+      profile_acked_ = true;
+      profile_req_active_ = false;
+    }
     if (it.in_flight && it.sent_ms && now_ms >= it.sent_ms) {
       double rtt = (double)(now_ms - it.sent_ms);
       st_.rtt_ms_last = rtt;
@@ -437,6 +443,8 @@ int ArqEngine::request_profile(int profile_id) {
   ni_wr16(pl + 2, (uint16_t)profile_id);
   ctrl_profile_ = (uint16_t)profile_id;
   profile_req_pending_ = true;
+  profile_req_active_ = true;
+  profile_req_ms_ = 0;   // stamped by the caller's clock on the next tick
   return send_frame(NI_FT_CTRL, pl, 4, true);
 }
 
@@ -617,6 +625,12 @@ int ArqEngine::on_pdu(const uint8_t* pdu, size_t n, int64_t now_ms) {
           if (op == 1 && arg < ni_profile_count()) {
             cfg_.mod_id = (uint8_t)arg;
             profile_req_pending_ = false;
+            // Changing the ARQ's idea of the profile is not enough: the modem that renders and
+            // decodes is owned by the link, and without this hook the far end kept transmitting on
+            // one profile and listening with another - the peers silently stopped being able to
+            // read each other after any adaptation.
+            if (on_profile_request) on_profile_request((int)arg);
+            ack_dirty_ = true;   // acknowledge the request so the requester knows to move too
           }
         }
         break;

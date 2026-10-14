@@ -54,6 +54,12 @@ class WasapiEngine {
   int render(const float* mono, int frames, int timeout_ms);
   int capture(float* mono, int frames);
 
+  // Frames the render endpoint has accepted but not yet played (IAudioClient::GetCurrentPadding).
+  // The half-duplex scheduler times its next burst from when the previous one finished *playing*, so
+  // this is the number that keeps an endpoint from talking over its peer's reply. Returns -1 when no
+  // render stream is open, which the callers report as "no backlog" rather than inventing one.
+  int queued_frames() const;
+
   double sample_rate() const { return fs_; }
   int render_channels() const { return render_ch_; }
   int capture_channels() const { return capture_ch_; }

@@ -77,8 +77,12 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
 
         profiles = parseProfiles(PhyTools.profilesJson())
         profileSpinner.adapter = simple(profiles.map { "#${it.first} ${it.second}" })
-        // Start on the profile the self-test ranked best on the modelled chain (see reports/).
-        profiles.indexOfFirst { it.second == "DBPSK-MID" }.let { if (it >= 0) profileSpinner.setSelection(it) }
+        // FD-LOW-DBPSK: the profile every measured end-to-end run has paired and delivered on, and the
+        // same one the Windows app starts on. Two apps whose defaults differ cannot pair by accident,
+        // which is what happened in the field.
+        profiles.indexOfFirst { it.second == "FD-LOW-DBPSK" }
+            .let { if (it >= 0) profileSpinner.setSelection(it) }
+        if (sessionEdit.text.isNullOrBlank()) sessionEdit.setText("7")   // same default as the PC
 
         inputSpinner.adapter = simple(deviceNames(true))
         outputSpinner.adapter = simple(deviceNames(false))
@@ -158,13 +162,30 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
     private fun startLink() {
         val sel = profileSpinner.selectedItemPosition
         val pid = if (sel in profiles.indices) profiles[sel].first else -1
+        // The single most common reason this app never paired: an empty passphrase. The engine cannot
+        // pair without one (it will not invent a key), so this is checked here, in words, before any
+        // service starts - instead of leaving the user watching a status line that says nothing.
+        val secret = secretEdit.text.toString()
+        if (secret.length < 8) {
+           results.text = "The passphrase is ${secret.length} characters long. Both ends need the SAME " +
+                "passphrase, 8 characters or more: without one the engine never even sends a pairing " +
+                "challenge, so nothing can pair. Type a passphrase here, type the identical one on the " +
+                "other device, then press Start again. Nothing has been started or transmitted."
+            secretEdit.requestFocus()
+            return
+        }
+        if (sessionEdit.text.toString().toIntOrNull() == null) {
+            results.text = "The session id must be a number (7 is the default). Both ends need the same one."
+            sessionEdit.requestFocus()
+            return
+        }
         val i = Intent(this, NoiseService::class.java).apply {
             putExtra(
                 NoiseService.EXTRA_ROLE,
                 if (roleGroup.checkedRadioButtonId == R.id.role_giver) "giver" else "receiver"
             )
             putExtra(NoiseService.EXTRA_PROFILE, pid)
-            putExtra(NoiseService.EXTRA_SECRET, secretEdit.text.toString())
+            putExtra(NoiseService.EXTRA_SECRET, secret)
             putExtra(NoiseService.EXTRA_SESSION, sessionEdit.text.toString().toIntOrNull() ?: 0)
             putExtra(NoiseService.EXTRA_DUPLEX, duplexBox.isChecked)
             putExtra(NoiseService.EXTRA_TUNNEL, tunnelBox.isChecked)
@@ -226,6 +247,13 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("  profile ").append(st.profile)
             st.sampleRate?.let { append("  fs ").append(it.toInt()) }
             append("\npeer ").append(if (st.peerOnline) "online" else "offline")
+            append("  pairing ").append(st.pairing)
+            append("\nmatch code: ").append(st.sas.ifBlank { "(not paired yet)" })
+            append("   <- must read the same on both devices")
+            append("\ninput ").append(st.f(st.inDbfs)).append(" dBFS")
+            append("  bursts seen ").append(st.n(st.syncHits))
+            append("  decoded ").append(st.n(st.framesReceived))
+            append("\nwhy: ").append(st.diagnosis())
             append("  mtu ").append(st.n(st.mtu))
             append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")
             append("  RSSI ").append(st.f(st.rssiDbfs)).append(" dBFS")

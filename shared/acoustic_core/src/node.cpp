@@ -110,7 +110,19 @@ int Node::start() {
     }
     return r;
   };
-  if (!cfg_.pairing_secret.empty()) link_->begin_pairing(cfg_.pairing_secret);
+  if (!cfg_.pairing_secret.empty()) {
+    link_->begin_pairing(cfg_.pairing_secret);
+    if (cfg_.pairing_secret.size() < 8)
+      pairing_note_ = "passphrase is only " + std::to_string(cfg_.pairing_secret.size()) +
+                      " characters: it works, but it is weak";
+  } else {
+    // The trap that produced "it never paired on either end": with an empty passphrase this
+    // function is never called, so no challenge is ever sent, no match code ever appears, and
+    // nothing anywhere says why. The front ends refuse to start in this state; this note is for
+    // every other caller, and it travels to the status JSON.
+    pairing_note_ = "no passphrase: pairing was never attempted, so this endpoint cannot pair. Both "
+                    "ends must be given the same passphrase (8+ characters) before Start.";
+  }
   running_ = true;
   return NI_OK;
 }
@@ -189,9 +201,20 @@ int Node::pull_playback(float* out, size_t cap) {
 int Node::step(int64_t now) {
   now_ms = now;
   if (!running_) return NI_ERR_STATE;
+  // Turn-taking is timed against played sound, not handed-out sound. With a modelled channel the
+  // node knows the whole queue itself. Without one - that is, in the Windows and Android apps - the
+  // only place that knows is the audio backend, which is why the apps call set_tx_backlog() with
+  // their device's own queue depth. Until they do, this stays 0 and the link will believe a burst is
+  // over the moment the samples left the library, which is what a sound card's buffer is for.
+  // Both halves of "audio that has not been played yet": what is still inside this library, and what
+  // the audio backend has already taken but not yet put on the speaker. In the apps the first half is
+  // always empty (no modelled channel means no internal queue) and the second is whatever the audio
+  // device reports; in the simulator it is the other way round plus, when a device queue is modelled,
+  // the samples still in flight to the peer.
+  size_t own = 0;
   if (chan_ && pace_tx_)
-    link_->set_tx_backlog(raw_tx_.size() +
-                          (ready_tx_.size() > ready_off_ ? ready_tx_.size() - ready_off_ : 0));
+    own = raw_tx_.size() + (ready_tx_.size() > ready_off_ ? ready_tx_.size() - ready_off_ : 0);
+  link_->set_tx_backlog(own + device_backlog_);
   link_->tick(now);
   if (rproxy_) rproxy_->pump(now);
   if (gproxy_) gproxy_->pump(now);
@@ -478,6 +501,12 @@ StatusSnapshot Node::snapshot() const {
     s.pairing = link_->pairing()->state_name();
     s.sas = link_->pairing()->sas();
   }
+  s.pairing_note = pairing_note_;
+  if (link_) {
+    s.in_dbfs = link_->input_dbfs();
+    s.sync_hits = link_->counters().sync_hits;
+    s.rx_no_frame = link_->counters().rx_no_frame;
+  }
   s.tunnel_detail = rproxy_ ? rproxy_->describe() : std::string("no local proxy on this role");
   if (gproxy_) s.tunnel_detail += " [giver: " + gproxy_->describe() + "]";
   s.internet_ok = peer_netinfo_valid_ && peer_netinfo_.http_ok;
@@ -500,6 +529,9 @@ std::string StatusSnapshot::to_json() const {
     << ", \"profile\": \"" << profile_name << "\", \"profile_id\": " << profile_id
     << ", \"modulation\": \"" << modulation << "\", \"sample_rate\": " << sample_rate
     << ", \"pairing\": \"" << pairing << "\", \"sas\": \"" << sas << "\""
+    << ", \"pairing_note\": \"" << pairing_note << "\""
+    << ", \"in_dbfs\": " << in_dbfs << ", \"sync_hits\": " << sync_hits
+    << ", \"rx_no_frame\": " << rx_no_frame
     << ", \"input_device\": \"" << input_device << "\", \"output_device\": \"" << output_device
     << "\", \"peer_online\": " << (peer_online ? "true" : "false") << ", \"peer_seen_ms\": " << peer_seen_ms
     << ", \"session_ms\": " << session_ms << ", \"snr_db\": " << snr_db << ", \"rssi_dbfs\": " << rssi_dbfs

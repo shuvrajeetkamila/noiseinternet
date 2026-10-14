@@ -89,6 +89,26 @@ Without adb: copy `noiseinternet-debug.apk` to the phone, tap it, allow installi
 app is named **Noise Internet**. It asks for the microphone permission once — it needs it to listen, and it
 runs a foreground service so the link survives the screen going off.
 
+**Before anything else: the three mistakes that stop pairing dead.** Every one of them was made in a real
+field test of this app, and none of them produced an error message at the time — that is fixed now, but the
+fix is only useful if you know what to look for.
+
+1. **An empty passphrase.** With no passphrase the engine does not send a pairing challenge at all, so the
+   two ends cannot pair and no amount of waiting will change that. Both apps now refuse to start and tell
+   you. Pick one passphrase, 8+ characters, and type the *same* one on both devices. The **match code**
+   cannot appear without it.
+2. **Different profile numbers or session ids on the two devices.** The profile is which set of tones is
+   used, and the session id is who is being talked to. If they differ, each end transmits in a language
+   the other is not listening to. Both apps now start on **profile 10, session id 7**; if you change one,
+   change it on both.
+3. **One end changing profile by itself.** Older builds had automatic profile adaptation enabled, and an
+   endpoint that decided to adapt switched *its own* tones while the other end kept its own — after which
+   the pair could never understand each other again. Adaptation is now off unless you ask for it, and a
+   change is only applied once the other end confirms it.
+
+The status panel now answers "why isn't it pairing" in one line, from the engine's own counters — see the
+table at the end of this file for what each answer means.
+
 **2. Start the Windows app.** Double-click `NoiseInternet.exe`. If SmartScreen objects, see the table
 below. The window has, from the top:
 
@@ -97,13 +117,15 @@ below. The window has, from the top:
 - **microphone**, a drop-down of your real capture endpoints (the list comes from WASAPI, and anything the
   system offers that is a loopback — your own output stream — is labelled as unusable here).
 - **speaker**, a drop-down of your real render endpoints.
-- **profile**, the modulation profile: rate against robustness. `11 FD-HIGH-DBPSK` is the one that
-  performs best in the model; `0 FSK-VOICE` is the most robust and the slowest; `7`/`8 ULTRA` are the
+- **profile**, the modulation profile: rate against robustness. It starts on **10 FD-LOW-DBPSK**, the
+  profile every measured end-to-end run has completed on, and the low band (700–3600 Hz) is the one that
+  copes with a room that reflects sound. `11 FD-HIGH-DBPSK` is faster in the model but needs a quiet,
+  non-reflective path; `0 FSK-VOICE` is the most robust and the slowest; `7`/`8 ULTRA` are the
   near-ultrasonic ones most speakers cannot reproduce.
 - **session id** and **passphrase**: both ends must use the *same* values or they will not pair.
 - **match code**: read-only, empty until a pairing succeeds. When it fills in it shows four words; the
-  other end must show the *identical* four words. If they differ, something is in the middle — do not
-  continue.
+  other end must show the *identical* four words (the phone prints it as `match code:` in its status box).
+  If they differ, something is in the middle — do not continue.
 - **full duplex (experimental)**: leave unticked. FDD plus echo cancellation has never been tested on
   hardware.
 - **local proxy on 127.0.0.1:8471 (receiver side)**: tick it if you want the receiver to serve the local
@@ -166,8 +188,9 @@ know. The window itself still has no field for it (defect 27).
 | SmartScreen "Windows protected your PC" | expected: unsigned. "More info → Run anyway", or verify the exe against the sha256 in `BUILD-INFO.txt` / the release page first. |
 | The window opens but the mic/speaker drop-downs only say `(system default)` | that machine exposed no capturable endpoints to WASAPI. The app will not invent one; it will fail at Start and say so. |
 | Play Protect / "unknown source" on Android | expected: debug-signed, not from the Play Store. |
-| The two ends never show the peer as online | different session id, different passphrase, or different profile. Compare all three, not just the passphrase. |
-| Match code stays empty, `pairing did not complete`, no audio at all | the giver's speaker is muted or the phone's media volume is 0; or the phone is applying "voice isolation"/noise suppression — turn audio effects off, and use the built-in mic and speaker, not a headset or Bluetooth (that routes the signal away from the air). |
+| The two ends never show the peer as online | work through the one-line **why** on each status panel, in this order: (1) *"no passphrase"* — type the same 8+ character passphrase on both ends; (2) *"bursts are arriving (sync found) but none of them decodes"* — the two ends are on different profile numbers or session ids, or the level is wrong: compare profile number, session id and passphrase character by character; (3) *"the microphone hears almost nothing (… dBFS)"* — the wrong microphone is selected, the other device is too quiet, or the devices are too far apart; (4) *"no burst decoded yet"* with a sane input level (−40 to −10 dBFS) — the other end may not be transmitting at all: check that it says it is running, and that it is on the same session id. |
+| Match code stays empty, no audio at all | the giver's speaker is muted or the phone's media volume is 0; or the phone is applying "voice isolation"/noise suppression — turn audio effects off, and use the built-in mic and speaker, not a headset or Bluetooth (that routes the signal away from the air). |
+| The window says *refused to start: the passphrase is N characters long* | that is the check working. Both ends need the same passphrase of 8+ characters; without one the engine never sends a pairing challenge. |
 | CRC failures and lots of retries | too loud or too far: the model has a ~26 dB receiver distortion floor (defect 20), and real AGC in phones makes that worse. Lower the volume a little and try again. |
 | Internet test fails at an early stage | the known state: the desktop proxy path does not pair (defect 21) and the Android tunnel carries no TCP. Which stage failed is the result — that is what the printout is for. |
 | A browser pointed at `127.0.0.1:8471` says it needs a password | correct: the local proxy uses `Proxy-Authorization: Noise <token>`, which browsers cannot send. Use the console build with `--proxy-token` and curl, as shown above. The window has no field for the token yet (defect 27). |

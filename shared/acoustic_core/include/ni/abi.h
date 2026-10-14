@@ -21,6 +21,11 @@ int ni_abi_destroy(NiNode* n);
 int ni_abi_start(NiNode* n);
 int ni_abi_stop(NiNode* n);
 int ni_abi_step(NiNode* n, int64_t now_ms);
+// How many frames the platform's audio device still has to play. The shell that owns the sound card
+// is the only thing that can measure this (WASAPI GetCurrentPadding, AudioTrack head vs written), and
+// turn-taking is timed against played sound, so a shell that never calls this leaves the link
+// assuming its bursts are on the air the moment the samples leave the library.
+int ni_abi_set_tx_backlog(NiNode* n, unsigned frames);
 // microphone -> engine
 int ni_abi_feed_pcm(NiNode* n, const float* pcm, int n_frames);
 // engine -> speaker; returns frames copied, 0 when nothing to play

@@ -158,6 +158,9 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
   std::deque<Ev> wire_ab, wire_ba;
   double prop_ms = 1000.0 * o.distance_m / 343.0;
   const int64_t delay_ms = (int64_t)(25 + prop_ms);
+  // Samples each endpoint has handed to its "sound card" and that have not reached the peer yet.
+  // That is what an app can measure about its own device queue, and all the link is ever told.
+  size_t in_flight[2] = {0, 0};
   int64_t t = 0;
   int64_t t0 = 0;
   R.seconds = 0.0;
@@ -167,6 +170,13 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
   Rng jitter(o.seed ^ 0x77);
 
   while (t < o.max_ms) {
+    // The endpoint is told about its own device queue BEFORE it decides whether to speak again -
+    // the same order the apps use (read the audio backend, then step the link). device_report =
+    // false is the apps as they were: the queue exists and nobody mentions it.
+    if (o.device_ms > 0 && o.device_report) {
+      A.node->set_tx_backlog(in_flight[0]);
+      B.node->set_tx_backlog(in_flight[1]);
+    }
     A.node->step(t);
     B.node->step(t);
     // drain both playback paths into the (modelled) wire
@@ -177,8 +187,9 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
         bool drop = o.burst_loss_prob > 0 && jitter.uniform() < o.burst_loss_prob;
         if (!drop) {
           Ev e;
-          e.at = t + delay_ms;
+          e.at = t + delay_ms + o.device_ms;
           e.pcm.assign(buf, buf + got);
+          in_flight[which] += e.pcm.size();
           (which ? wire_ba : wire_ab).push_back(std::move(e));
         }
       }
@@ -188,6 +199,7 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
       while (!q.empty() && q.front().at <= t) {
         Ev e = std::move(q.front());
         q.pop_front();
+        in_flight[which] -= e.pcm.size() < in_flight[which] ? e.pcm.size() : in_flight[which];
         Side& into = which ? A : B;
         into.node->feed_capture(e.pcm.data(), e.pcm.size());
       }

@@ -164,6 +164,14 @@ int ni_wasapi_enumerate(std::vector<AudioDeviceInfo>* out, std::string* why_not)
   return (int)(out->size() - before);
 }
 
+int WasapiEngine::queued_frames() const {
+  if (!p_) return -1;
+  if (!p_->render.ac) return -1;
+  UINT32 pad = 0;
+  if (FAILED(p_->render.ac->GetCurrentPadding(&pad))) return -1;
+  return (int)pad;
+}
+
 struct WasapiEngine::Impl {
   struct Side {
     IMMDevice* dev = nullptr;

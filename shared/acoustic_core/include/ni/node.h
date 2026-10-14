@@ -50,6 +50,10 @@ struct StatusSnapshot {
   // diagnostics JSON - which is why neither UI could show them (they are here so both can).
   std::string pairing = "none";   // "none" | "wait-challenge" | "wait-response" | "paired" | "failed"
   std::string sas;                // 4-word short authentication string, empty until paired
+  // Why the link is not pairing, in the engine's own words, whenever that can be answered locally -
+  // today that means "the passphrase is empty, so no challenge was ever sent". Both front ends show
+  // this verbatim; the alternative is a user staring at "peer offline" forever.
+  std::string pairing_note;
   int state = NI_ST_IDLE;
   bool running = false;
   int profile_id = 0;
@@ -60,6 +64,11 @@ struct StatusSnapshot {
   int64_t peer_seen_ms = 0;
   int64_t session_ms = 0;
   double snr_db = 0, rssi_dbfs = -120, noise_dbfs = -120, evec_pct = 0;
+  // Diagnostics that answer "why is nothing decoding": the newest capture block's level, how many
+  // bursts had their sync found but could not be read, and how many callbacks saw no signal at all.
+  double in_dbfs = -120;          // newest microphone block, dBFS (measured every callback)
+  uint64_t sync_hits = 0;         // bursts whose sync was detected
+  uint64_t rx_no_frame = 0;       // callbacks the squelch found empty
   double link_bps = 0, useful_bps_up = 0, useful_bps_down = 0;
   double loss_pct = 0, rtt_ms = 0, erle_db = 0;
   uint64_t bytes_sent = 0, bytes_received = 0, frames_sent = 0, frames_received = 0;
@@ -106,6 +115,13 @@ class Node {
   int calibrate(int64_t now_ms, Calibrator::Report* out);   // runs a full calibration exchange
   int test_link(int64_t now_ms, int payload_bytes, std::string* report);  // hash-compared ping
   int test_internet(int64_t now_ms, const std::string& url, InternetVerify* out);
+  // How many frames the audio device still has queued and unplayed. The apps sample this from
+  // their own audio backend (WASAPI GetCurrentPadding, AudioTrack head vs written) and hand it to
+  // the link, so turn-taking is timed against the sound that has actually been played rather than
+  // against the sound that has been copied out of this library. See Node::step.
+  void set_tx_backlog(size_t samples) { device_backlog_ = samples; }
+  size_t tx_backlog() const { return device_backlog_; }
+
   // Loopback self-check usable with no peer: render -> channel model -> decode.
   int selftest(int payload_bytes, uint64_t seed, PhyTestResult* out);
   int start_calibration_probe(int profile_id, int frames, uint16_t* tag);
@@ -149,6 +165,8 @@ class Node {
   std::unique_ptr<ReceiverGateway> rproxy_;
   std::unique_ptr<GiverGateway> gproxy_;
   bool pace_tx_ = true;                     // see set_pace_tx
+  size_t device_backlog_ = 0;               // frames the real audio device still owes (set_tx_backlog)
+  std::string pairing_note_;
   std::unique_ptr<AcousticChannel> chan_;   // sim channel applied to our own TX
   std::unique_ptr<NlmsAec> aec_;
   std::function<void(const Delivered&)> msg_;

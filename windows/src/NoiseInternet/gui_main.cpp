@@ -268,6 +268,10 @@ struct App {
           if (need > (int)buf.size()) need = (int)buf.size();
           int got = node->pull_playback(&buf[0], (size_t)need);
           if (got > 0) audio->render(&buf[0], got, 50);
+          // Tell the link how much of what we just handed over is still unplayed: turn-taking is
+          // timed against played sound, not against samples sitting in the sound card's buffer.
+          int q = audio->queued_frames();
+          if (q >= 0) node->set_tx_backlog((size_t)q);
           node->step((int64_t)GetTickCount64());
         }
       }
@@ -330,13 +334,31 @@ struct App {
   bool start() {
     if (running.load()) { say(L"already running."); return true; }
     if (busy.load()) { say(L"wait for the running test to finish first."); return false; }
+    // The trap that cost a real field test: with an empty passphrase the engine never sends a pairing
+    // challenge at all, so the two ends can never pair and nothing on screen says why. Refuse here, in
+    // words, before anything is opened - and put the cursor in the field that has to change.
+    {
+      std::string secret_now = edit_u8(secret);
+      if (secret_now.size() < 8) {
+        std::wstring m = fmt(L"The passphrase is %d characters long.\n\n"
+                             L"Both ends must be given the SAME passphrase of at least 8 characters. "
+                             L"Without one the engine never even sends a pairing challenge, so the two "
+                             L"ends cannot pair - that is the usual reason \"it never paired\".\n\n"
+                             L"Nothing has been started and nothing has been transmitted.",
+                             (int)secret_now.size());
+        say(L"refused to start: " + m);
+        SetFocus(secret);
+        MessageBoxW(win, m.c_str(), L"Noise Internet - passphrase required", MB_OK | MB_ICONWARNING);
+        return false;
+      }
+    }
     NodeConfig cfg;
     cfg.role = (SendMessageW(giver_radio, BM_GETCHECK, 0, 0) == BST_CHECKED) ? NI_ROLE_GIVER
                                                                               : NI_ROLE_RECEIVER;
     cfg.is_master = (cfg.role == NI_ROLE_GIVER);
     cfg.name = "win-gui";
     int pi = (int)SendMessageW(prof, CB_GETCURSEL, 0, 0);
-    cfg.profile_id = (pi >= 0 && pi < (int)profile_ids.size()) ? profile_ids[(size_t)pi] : 2;
+    cfg.profile_id = (pi >= 0 && pi < (int)profile_ids.size()) ? profile_ids[(size_t)pi] : 10;
     cfg.session_id = (uint16_t)atoi(edit_u8(session).c_str());
     cfg.pairing_secret = edit_u8(secret);
     cfg.duplex = (SendMessageW(duplex, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
@@ -417,6 +439,11 @@ struct App {
              (long long)s.session_ms);
     t += fmt(L"peer %hs (last heard %lld ms ago)   pairing %hs\r\n",
              s.peer_online ? "ONLINE" : "offline", (long long)s.peer_seen_ms, s.pairing.c_str());
+    t += fmt(L"match code: %hs   <- must read identically on the other device\r\n",
+             s.sas.empty() ? "(not paired yet)" : s.sas.c_str());
+    t += fmt(L"input %.1f dBFS   bursts seen %llu   decoded %llu   callbacks with no signal %llu\r\n",
+             s.in_dbfs, (unsigned long long)s.sync_hits, (unsigned long long)s.frames_received,
+             (unsigned long long)s.rx_no_frame);
     t += fmt(L"snr %.2f dB   rssi %.1f dBFS   noise %.1f dBFS   rtt %.1f ms   loss %.2f %%\r\n",
              s.snr_db, s.rssi_dbfs, s.noise_dbfs, s.rtt_ms, s.loss_pct);
     t += fmt(L"mtu %d   link payload %.0f b/s   useful up %.0f / down %.0f b/s\r\n", s.mtu, s.link_bps,
@@ -429,6 +456,24 @@ struct App {
              (unsigned long long)s.bytes_received);
     t += fmt(L"tunnel %hs: %hs\r\n", s.tunnel_up ? "up" : "down", s.tunnel_detail.c_str());
     t += fmt(L"internet %hs: %hs\r\n", s.internet_ok ? "verified" : "not verified", s.internet_detail.c_str());
+    // The one-line answer to "why isn't it pairing", from the engine's own counters. Every branch
+    // names the number it is based on, and when the numbers are fine it says so instead of guessing.
+    t += L"why: ";
+    if (!s.pairing_note.empty())
+      t += w8(s.pairing_note);
+    else if (s.peer_online && s.pairing == "paired")
+      t += L"paired and exchanging frames";
+    else if (s.sync_hits > 0 && s.frames_received == 0)
+      t += L"bursts are arriving (sync found, nothing readable): the two ends are most likely on "
+           L"different profiles or session ids, or the level is wrong. Set the SAME profile number, "
+           L"session id and passphrase on both ends.";
+    else if (s.in_dbfs < -70.0)
+      t += fmt(L"the microphone hears almost nothing (%.1f dBFS): check which microphone is selected, "
+               L"the other device's volume, and the distance.", s.in_dbfs);
+    else
+      t += fmt(L"listening: input %.1f dBFS, no burst decoded yet. Check both ends use the same "
+               L"profile, session id and passphrase, and that both are started.", s.in_dbfs);
+    t += L"\r\n";
     if (!s.audio_note.empty()) t += fmt(L"NOTE: %hs\r\n", s.audio_note.c_str());
     t += L"rates are what this session delivered, over whatever path the audio really took - not a "
          L"prediction and not an internet speed.";
@@ -543,7 +588,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                 p.f_high);
         SendMessageW(a->prof, CB_ADDSTRING, 0, (LPARAM)line.c_str());
       }
-      SendMessageW(a->prof, CB_SETCURSEL, 11, 0);   // FD-HIGH-DBPSK, the profile the verified 2 kB runs used
+      // FD-LOW-DBPSK: the profile every measured end-to-end run has paired and delivered on, in the
+      // 700-3600 Hz band that survives a reflective room. FD-HIGH-DBPSK (11) is faster in the model but
+      // needs a quiet, non-reflective path; it is two clicks away in this list.
+      SendMessageW(a->prof, CB_SETCURSEL, 10, 0);
       SendMessageW(a->giver_radio, BM_SETCHECK, BST_CHECKED, 0);
       SendMessageW(a->proxy, BM_SETCHECK, BST_CHECKED, 0);
       SetTimer(hwnd, TIMER_REFRESH, 250, nullptr);

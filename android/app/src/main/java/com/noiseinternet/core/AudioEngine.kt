@@ -233,6 +233,32 @@ class AudioEngine(
         track = null
     }
 
+    /**
+     * Frames the AudioTrack has accepted but not yet played. The half-duplex scheduler times its next
+     * burst from when the previous one finished *playing*, so this number is what stops an endpoint
+     * from talking over its peer's reply - and until it existed, the native link assumed a burst was
+     * over the instant the samples left the library, up to a whole buffer early.
+     *
+     * -1 means "this platform will not tell us", which is reported as 0 frames of backlog: the link
+     * then behaves as it did before, rather than being handed an invented number.
+     */
+    fun queuedFrames(): Long {
+        val t = track ?: return -1
+        if (Build.VERSION.SDK_INT < 23) return -1
+        return try {
+            val written = t.framesWritten
+            val head = t.playbackHeadPosition.toLong() and 0xFFFFFFFFL   // it wraps at 2^32
+            val inFlight = written - head
+            when {
+                inFlight < 0 -> 0L
+                inFlight > t.bufferSizeInFrames.toLong() -> t.bufferSizeInFrames.toLong()
+                else -> inFlight
+            }
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
     /** What the status panel prints under "audio". Everything here is measured by the platform. */
     fun describe(): String = buildString {
         append(sampleRate).append(" Hz mono float, period ")
