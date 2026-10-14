@@ -30,6 +30,16 @@ const char* kGoodConfig =
     "{\"name\":\"abi-test\",\"role\":\"giver\",\"profile\":3,\"fs\":48000,\"session_id\":7,"
     "\"pairing_secret\":\"long enough to be unguessable\",\"duplex\":0}";
 
+// The config both apps ship with, except for the passphrase the user is expected to type. Start() must
+// refuse it: without a passphrase no challenge is ever sent, so the two ends cannot pair, and the
+// failure the user sees ("it never pairs") used to have no cause visible anywhere.
+const char* kNoSecretConfig =
+    "{\"name\":\"abi-test\",\"role\":\"giver\",\"profile\":10,\"fs\":48000,\"session_id\":7,"
+    "\"pairing_secret\":\"\",\"duplex\":0}";
+const char* kShortSecretConfig =
+    "{\"name\":\"abi-test\",\"role\":\"giver\",\"profile\":10,\"fs\":48000,\"session_id\":7,"
+    "\"pairing_secret\":\"short\",\"duplex\":0}";
+
 }  // namespace
 
 int main() {
@@ -55,6 +65,25 @@ int main() {
   NiNode* bad = ni_abi_create("this is not json at all", err, (int)sizeof(err));
   NT_CHECK_MSG(bad == nullptr, "ni_abi_create must reject a config that is not an object");
   NT_CHECK_MSG(err[0] != 0, "and must say why");
+
+  // ---- a start that cannot pair must be refused, in words a support conversation can use ----
+  for (const char* cfg : {kNoSecretConfig, kShortSecretConfig}) {
+    err[0] = 0;
+    NiNode* ns = ni_abi_create(cfg, err, (int)sizeof(err));
+    NT_CHECK_MSG(ns != nullptr, "a config with an empty or short passphrase is still a valid config");
+    if (ns) {
+      int rc = ni_abi_start(ns);
+      NT_CHECK_MSG(rc != NI_OK, "start must refuse a passphrase that cannot pair");
+      // The reason is asserted through the status JSON, because that is the surface both apps render:
+      // a refusal the UI cannot show is a refusal the user cannot act on.
+      char* sj = ni_abi_status_json(ns);
+      std::string w = sj ? sj : "";
+      ni_abi_free(sj);
+      NT_CHECK_MSG(w.find("passphrase") != std::string::npos && w.find("8") != std::string::npos,
+                   "and the status JSON the two panels render must name the passphrase and the length");
+      ni_abi_destroy(ns);
+    }
+  }
 
   // ---- the lifecycle a shell actually drives ----
   err[0] = 0;

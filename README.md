@@ -26,9 +26,39 @@ format, FEC and AEAD construction agree with independently generated reference v
 message crosses the **modelled** device chain in both directions at once, reassembled and SHA-256-verified
 at each end, in 30.3 s - about 540 bit/s, roughly 67 bytes per second. **No message has ever crossed real
 speakers and a real microphone**: no build host here has audio hardware, and neither binary has been
-installed on a phone, so over-the-air performance and the two hardware-dependent gates are NOT TESTED, and
-the proxy/VPN leg is FAIL. Nothing in this repository is reported as an internet speed; a symbol rate that
-no transducer has produced is not a throughput claim.
+installed on a phone, so over-the-air performance and the two hardware-dependent gates are NOT TESTED. The
+proxied-HTTP leg now does run end to end in the model - `curl` -> receiver's proxy -> acoustic link -> the
+giver's fetch helper -> an origin, and the origin's own log shows the request arriving in a measured run -
+but the **response** does not get back yet (the receiver reports the reply's frames as malformed and the
+proxy answers 504), so no byte of an origin response has ever crossed this link and nothing here is
+described as internet-sharing. Nothing in this repository is reported as an internet speed; a symbol rate
+that no transducer has produced is not a throughput claim.
+
+## Before the first pairing attempt: three things that must match
+
+A pairing handshake is a three-way exchange between two devices, and if any of these three disagree the
+two ends are silent to each other - which is what the first hardware report ("it never paired, from both
+the exe and the apk") looked like. All three are now enforced or unified, and both apps display what they
+are running so a mismatch is visible instead of mysterious:
+
+1. **Passphrase.** 8+ characters, typed the same on both devices. The engine refuses to start without one
+   (before this, it simply sent no pairing challenge and reported nothing), and both apps refuse before
+   opening the microphones. The match code appears only after a successful pairing, so an empty match code
+   with an empty passphrase field is the first thing to check.
+2. **Profile and session id.** Both apps now open on **FD-LOW-DBPSK (profile 10)** and **session 7**; they
+   used to default to different values (profile 11/session 7 on the PC, profile 2/session 0 on the phone),
+   and two endpoints on different profiles or sessions cannot decode each other at all. If you change one,
+   change it on both - the two panels show both numbers.
+3. **Adaptive modulation, off by default.** It used to be on in every node, and a profile change moved the
+   requester's own modem while only asking the peer to follow, so one lost control frame left the two ends
+   on different profiles permanently. It is now off unless a caller opts in, it cannot fire before the
+   link is up, and a change is committed only after the peer acknowledges it.
+
+What the model says is *not* an explanation for a link that will not pair, so it is not worth guessing
+about: lost bursts up to 10%, a 100-300 ms sound-card queue, and a 300 ppm clock offset between the two
+devices all still pair and deliver (`reports/RESULTS.md` §4.8). What the model cannot know is the room -
+so both apps show the measured input level, whether bursts are arriving at all, and whether they decode,
+which is what separates "nothing audible" from "audible but unintelligible" in one line.
 
 ## Prebuilt binaries
 

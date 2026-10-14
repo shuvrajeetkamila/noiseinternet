@@ -168,6 +168,15 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
   bool paired = false;
   float buf[8192];
   Rng jitter(o.seed ^ 0x77);
+  // `burst_loss_prob` is documented as "fraction of bursts the model drops entirely (fades /
+  // interruptions)", and that is what it must be. The first version flipped its coin per pulled BLOCK
+  // (5 ms of audio), which is a different experiment: a 200 ms burst contains about forty blocks, so a
+  // nominal 5% became 1 - 0.95^40 = 87% of bursts damaged, and pairing tests run against it were
+  // measuring that artefact rather than the handshake (defect 26 was diagnosed on those runs). The coin
+  // is now flipped once per burst - a burst starts when playback goes from idle to busy - and a burst
+  // that loses is dropped whole.
+  bool in_burst[2] = {false, false};
+  bool drop_burst[2] = {false, false};
 
   while (t < o.max_ms) {
     // The endpoint is told about its own device queue BEFORE it decides whether to speak again -
@@ -183,8 +192,14 @@ LinkSimResult ni_link_sim(const LinkSimOptions& o) {
     for (int which = 0; which < 2; which++) {
       Side& s = which ? B : A;
       int got = s.node->pull_playback(buf, (size_t)per_ms * (size_t)blk_ms);
-      if (got > 0) {
-        bool drop = o.burst_loss_prob > 0 && jitter.uniform() < o.burst_loss_prob;
+      if (got <= 0) {
+        in_burst[which] = false;   // playback went idle: the next samples start a new burst
+      } else {
+        if (!in_burst[which]) {
+          in_burst[which] = true;
+          drop_burst[which] = o.burst_loss_prob > 0 && jitter.uniform() < o.burst_loss_prob;
+        }
+        bool drop = drop_burst[which];
         if (!drop) {
           Ev e;
           e.at = t + delay_ms + o.device_ms;

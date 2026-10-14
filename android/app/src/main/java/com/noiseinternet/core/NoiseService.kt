@@ -119,9 +119,13 @@ class NoiseService : VpnService(), AudioEngine.Sink {
         val cfg = NoiseCore.Config(
             role = if (intent?.getStringExtra(EXTRA_ROLE) == "giver") NoiseCore.Role.GIVER
             else NoiseCore.Role.RECEIVER,
-            profile = intent?.getIntExtra(EXTRA_PROFILE, 2) ?: 2,
+            // Fallbacks matter: the extras are missing whenever the platform restarts the service, and
+            // they used to be 2 / 0 while the PC defaults to 10 / 7 - two apps that cannot pair, with
+            // nothing on screen saying why. Same numbers as the windowed app, the console app and
+            // NoiseCore.Config.
+            profile = intent?.getIntExtra(EXTRA_PROFILE, 10) ?: 10,
             pairingSecret = intent?.getStringExtra(EXTRA_SECRET) ?: "",
-            sessionId = intent?.getIntExtra(EXTRA_SESSION, 0) ?: 0,
+            sessionId = intent?.getIntExtra(EXTRA_SESSION, 7) ?: 7,
             sampleRate = intent?.getIntExtra(EXTRA_FS, 48000) ?: 48000,
             duplex = intent?.getBooleanExtra(EXTRA_DUPLEX, false) ?: false,
             proxyEnable = true,

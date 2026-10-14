@@ -16,12 +16,21 @@ namespace ni {
 struct NodeConfig {
   Role role = NI_ROLE_GIVER;
   bool is_master = true;       // link master (polls). Default: the giver.
-  int profile_id = 2;          // DBPSK-MID
+  int profile_id = 10;         // FD-LOW-DBPSK: the profile every measured end-to-end run delivered on
   double fs = 48000.0;
   double tx_amplitude = 0.85;
-  uint16_t session_id = 0;
+  // 0x0007 in both apps, and both apps must agree on it or the two ends are talking to different
+  // sessions. Two apps whose defaults differ cannot pair by accident, and that was one of the ways a
+  // first field test failed silently: the phone defaulted to profile 2 / session 0 while the PC
+  // defaulted to profile 11 / session 7.
+  uint16_t session_id = 7;
   std::string pairing_secret;   // empty = unpaired (DATA refused unless allow_plaintext)
   bool allow_plaintext_test = false;
+  // A passphrase is what makes pairing possible at all: Node::start() refuses to start without one
+  // (see the check there) unless allow_unpaired is set deliberately. min_secret_len is the length the
+  // front ends also enforce, because a silent "nothing happens" is the worst possible failure mode for
+  // a first run.
+  int min_secret_len = 8;
   int duplex = 0;               // 0 half, 1 FDD full-duplex experiment
   int rx_profile_id = -1;       // duplex=1 only
   int aec_taps = 1024;
@@ -40,6 +49,9 @@ struct NodeConfig {
   std::string name = "node";
   int calibrate_trials = 3;   // per band, per SNR point
   int arq_wait_ms = 12000;    // how long test_link pumps before giving up
+  // Set only by tools that have no peer by design (calibration) or that deliberately measure the
+  // plaintext path. Both apps leave it false, so neither can start without a passphrase.
+  bool allow_unpaired = false;
 };
 
 struct StatusSnapshot {

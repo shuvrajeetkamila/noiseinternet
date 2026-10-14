@@ -79,6 +79,20 @@ int Node::start() {
   if (running_) return NI_OK;  // see AcousticLink::start(): starting twice is not a restart
   int rc = ensure_built();
   if (rc != NI_OK) return rc;
+  // Refuse a start that cannot possibly pair. Without this the engine transmitted nothing at all (no
+  // challenge is sent when the passphrase is empty), the peer stayed "offline" for ever, and no error
+  // was reported anywhere - which is exactly the report that came back from the first field test
+  // ("it never paired, from both the exe and the apk"). The front ends check the field themselves and
+  // say so in their own words; this is the guarantee behind them, for every future caller too.
+  if (!cfg_.allow_unpaired && (int)cfg_.pairing_secret.size() < cfg_.min_secret_len) {
+    pairing_note_ = "no pairing is possible: the passphrase is " +
+                    std::to_string(cfg_.pairing_secret.size()) + " characters and at least " +
+                    std::to_string(cfg_.min_secret_len) +
+                    " are needed. Both devices must be given the SAME passphrase; without one the "
+                    "engine never sends a pairing challenge, so the two ends can never pair.";
+    err_ = pairing_note_;
+    return NI_ERR_PARAM;
+  }
   rc = link_->start();
   if (rc != NI_OK) {
     err_ = link_->last_error();

@@ -430,6 +430,7 @@ int cmd_calibrate(const Opts& o) {
   c.fs = o.num("fs", 48000);
   c.tx_amplitude = o.num("volume", 0.85);
   c.calibrate_trials = (int)o.num("trials", 3);
+  c.allow_unpaired = true;   // calibration is a solo measurement: no peer, no pairing, no secret
   c.sim_channel = true;
   c.ch = channel_from(o);
   c.ch.fs = c.fs;
@@ -969,7 +970,13 @@ struct LocalOrigin {
       if (c < 0) continue;
       char buf[4096];
       ssize_t n = ::recv(c, buf, sizeof buf, 0);   // we do not parse: any request gets the document
-      (void)n;
+      if (getenv("NI_GATEWAY_TRACE")) {            // same switch as the giver's helper
+        std::string first(buf, n > 0 ? (size_t)n : 0);
+        size_t e = first.find("\r\n");
+        fprintf(stderr, "[origin] %s\n", e == std::string::npos ? first.c_str()
+                                                               : first.substr(0, e).c_str());
+        fflush(stderr);
+      }
       std::ostringstream resp;
       resp << "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " << doc.size()
            << "\r\nConnection: close\r\n\r\n"

@@ -231,6 +231,9 @@ int main(int argc, char** argv) {
       app.cfg.fs = atof(v.c_str());
     } else if (a == "--allow-unpaired") {
       app.allow_unpaired = true;
+      // The core refuses a pairing-less start unless told it is intended, and the console app is
+      // where that intention is expressed (the windowed app has no such flag: it always pairs).
+      app.cfg.allow_unpaired = true;
     } else if (a == "--secret") {
       if (next(v)) return 2;
       app.cfg.pairing_secret = v;
