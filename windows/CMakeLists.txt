@@ -25,6 +25,15 @@ if(MSVC)
   # Turn it off (-DNI_STATIC_RUNTIME=OFF) to get the smaller /MD build that does need the redist.
   option(NI_STATIC_RUNTIME "link the MSVC runtime statically (/MT) so the exe is standalone" ON)
   if(NI_STATIC_RUNTIME)
+    # The flag-variable trick below is INERT on its own since CMake 3.15: under policy CMP0091=NEW the
+    # runtime is not in CMAKE_CXX_FLAGS_RELEASE at all, it is chosen by CMAKE_MSVC_RUNTIME_LIBRARY, whose
+    # default is MultiThreadedDLL. First attempt at a standalone exe shipped /MD anyway, and the only
+    # reason anybody noticed is that the CI packaging step reads the import table of the linked file
+    # (dumpbin /dependents) instead of trusting this option - recorded as defect 28. Both mechanisms are
+    # set so the option works whether or not the policy is NEW.
+    if(POLICY CMP0091)
+      set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
     foreach(_v CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
       string(REPLACE "/MDd" "/MTd" ${_v} "${${_v}}")
     endforeach()
@@ -33,7 +42,7 @@ if(MSVC)
                CMAKE_C_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_MINSIZEREL)
       string(REPLACE "/MD" "/MT" ${_v} "${${_v}}")
     endforeach()
-    message(STATUS "MSVC runtime: static (/MT) - the exe will not need vcruntime140/msvcp140")
+    message(STATUS "MSVC runtime: asking for static (/MT); CMAKE_MSVC_RUNTIME_LIBRARY=[${CMAKE_MSVC_RUNTIME_LIBRARY}] - the packaging step verifies the real import table")
   else()
     message(STATUS "MSVC runtime: dynamic (/MD) - the redist DLLs must ship next to the exe")
   endif()
