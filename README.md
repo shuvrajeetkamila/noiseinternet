@@ -44,7 +44,7 @@ Built by CI from the tip of the working branch and published as the pre-release 
   Internet test, a measured status panel and an engine log. `NoiseInternet-console.exe` is the same app from
   a terminal (`--list-devices`, `--wav-*`, single-key tests), plus `ni.exe`, `README-RUN.md`,
   `NOTICE-redist.txt`, `ui-check.txt` (the control inventory and endpoint count the build agent measured
-  when it ran the window), `BUILD-INFO.txt` with a hash per file, and `redist/` holding `vcruntime140.dll`,
+  when it ran the window: 26 controls, 16 profiles, 0 endpoints because a build agent has none, `ui-check PASSED`), `BUILD-INFO.txt` with a hash per file, and `redist/` holding `vcruntime140.dll`,
   `vcruntime140_1.dll` and `msvcp140.dll` for a dynamically-linked build.
 - `noiseinternet-android-windows.zip` - both of the above plus the instructions at the top level.
 - `NoiseInternet.exe` - the bare windowed app, for when you already have the rest.

@@ -446,14 +446,20 @@ struct App {
   // --ui-check: prove the window and its controls exist, and report what the machine actually has.
   void ui_check() {
     g_trace.open(L"ui-check.txt");
+    // `%ls` is a wide string in MSVC's wide printf family: passing the narrow literal "created" here
+    // printed 牣慥整d the first time this ran. The trace that exists to make failures legible has to be
+    // legible itself, and the only reason the mistake was visible is that the transcript was read.
     g_trace.line(fmt(L"ui-check: window=%ls class=%ls, written by the exe that is in this bundle",
-                     running.load() ? "running" : "created", L"NoiseInternetGui"));
+                     running.load() ? L"running" : L"created", L"NoiseInternetGui"));
     g_trace.line(L"controls created by the window (class, enabled, visible, size, text):");
     ChildDump ctx{&g_trace, 0};
     EnumChildWindows(win, child_dump, (LPARAM)&ctx);
     int caps = 0, micc = 0;
     for (size_t i = 0; i < devs.size(); ++i) devs[i].is_capture ? ++micc : ++caps;
-    g_trace.line(fmt(L"total controls: %d", ctx.count));
+    g_trace.line(fmt(L"total controls: %d (each was created; the visibility column reads no on a build "
+                     L"agent because the desktop is not shown there - this check proves existence, size, "
+                     L"text and enabled state, not that a human saw the window)", ctx.count));
+    g_trace.line(fmt(L"top-level window itself: visible=%ls", IsWindowVisible(win) ? L"yes" : L"no"));
     g_trace.line(fmt(L"audio endpoints this machine offered: %d (capture %d, render %d). A build agent has "
                      L"none; that is the real answer for that machine and it is why no acoustic claim is "
                      L"made here.", (int)devs.size(), micc, caps));
