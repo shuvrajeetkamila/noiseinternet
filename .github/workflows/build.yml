@@ -205,9 +205,8 @@ jobs:
           # completely normal. A front end that cannot pass its own smoke test does not get published; the
           # APK is a separate artifact and still ships.
           if (-not $ui_ok) {
-            "pkg: REFUSING TO PUBLISH - the shipped exe failed its own --ui-check. The trace above (the file"
-            " | Out-File -Append pkg.log
-            "pkg: it wrote, or the exit code if it wrote nothing) is the diagnosis." | Out-File -Append pkg.log
+            $msg = 'pkg: REFUSING TO PUBLISH - the exe failed its own --ui-check (the trace above is its own explanation; if there is no trace, the exit code is)'
+            $msg | Out-File -Append pkg.log
             exit 6
           }
           # Where the MSVC runtime DLLs live on this runner. Copied, not built: unmodified redist files.
