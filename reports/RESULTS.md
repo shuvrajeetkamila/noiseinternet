@@ -643,6 +643,32 @@ here as well: a green suite did not find them, and neither did a single end-to-e
     second tested byte-identical payloads. On profile 10 at 26 dB SNR the payload does not cross within
     60 s of device time - that is the marginal-channel case of defects 20/22, not this one.
 
+### The receiver proxy's response leg now completes (defects 61-66)
+
+Measured here with `ni demo --profile 11 --snr 35` (two real nodes, the only path between them being
+16-bit PCM through the channel model, the origin a plain-HTTP server on this host):
+
+```
+  [t= 2370 ms] curl direct #1   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  [t= 3730 ms] curl direct #2   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  [t=22650 ms] curl via proxy   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  through-proxy bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  direct #1     bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  direct #2     bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  comparison          : IDENTICAL - the 400 bytes that arrived through the acoustic link
+```
+
+and the receiver's own report for the same run: `proxy_receiver: requests_ok 2, requests_fail 0,
+bytes_relayed 351`, `proxy_giver: fetches_ok 1, fetches_fail 0`.
+
+**This retires the claim those earlier reports made about defect 41.** Defect 41's stream-id translation was
+necessary and correct, but it was not what blocked the response leg: the client received its own request
+back as the "response" (defect 64, which also hid 63), and the proxy's copy of the client had a dead socket
+so nothing could be written to it (defect 61). With 61-65 fixed the leg completes, and `ni demo` now says
+so instead of telling the reader it cannot. What this still does not prove: that a real speaker and a real
+microphone can do it (the room here is modelled), internet access (the origin is on this host), latency or
+browsing speed. Those remain gates F-H.
+
 ## 1b. CSV exports
 
 `reports/linksim.csv` and `reports/selftest_*.csv` are derived from the raw logs by
