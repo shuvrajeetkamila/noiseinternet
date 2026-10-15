@@ -109,21 +109,35 @@ jobs:
           test -n "$apk" || { echo "gradle said OK but no APK exists"; exit 1; }
           cp "$apk" noiseinternet-debug.apk
           echo "apk: noiseinternet-debug.apk ($(stat -c %s noiseinternet-debug.apk) bytes)"
-          # Both stamps have to be inside the APK: the Kotlin string resource (the app's own stamp) and the
-          # C++ macro compiled into libnoiseinternet_jni.so (the engine's). grep -a on the .so is a crude but
-          # decisive check that the NDK build really received -DNI_BUILD_STAMP.
-          unzip -p noiseinternet-debug.apk classes.dex | grep -aF "$NI_BUILD_STAMP" >/dev/null \
-            || { echo "the APK does not contain the app build stamp $NI_BUILD_STAMP in classes.dex"; exit 1; }
-          for so in arm64-v8a x86_64; do
-            unzip -p noiseinternet-debug.apk "lib/$so/libnoiseinternet_jni.so" | grep -aF "$NI_BUILD_STAMP" >/dev/null \
-              || { echo "lib/$so/libnoiseinternet_jni.so does not contain the build stamp"; exit 1; }
-          done
-          echo "build stamp $NI_BUILD_STAMP found in classes.dex and in both native libraries"
-          # And in the packaged resources, which is where the app reads its own stamp from.
-          bt=$(ls "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}"/build-tools/*/aapt2 2>/dev/null | head -1)
-          if [ -n "$bt" ]; then
-            "$bt" dump resources noiseinternet-debug.apk 2>/dev/null | grep -m2 -E "ni_build_stamp|versionName" || true
-          fi
+          # Both stamps have to be inside the APK, and each lives somewhere different:
+          #   * the app's own stamp is a string RESOURCE (resValue -> resources.arsc), so `aapt2 dump
+          #     resources` is what can read it back - the first version of this check grepped classes.dex,
+          #     which only holds the resource's integer id, and failed a perfectly good build.
+          #   * the engine's stamp is a C++ macro in libnoiseinternet_jni.so, which is a plain UTF-8 string
+          #     in the library's read-only data.
+          # Everything here is appended to android.log as well as printed, so a failure arrives in the
+          # commit comment where it can actually be read (this project's sandbox cannot fetch job logs).
+          {
+            bt=$(ls "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}"/build-tools/*/aapt2 2>/dev/null | head -1)
+            if [ -z "$bt" ]; then
+              echo "no aapt2 in the SDK build-tools; cannot verify the APK's build stamp"; exit 1
+            fi
+            echo "aapt2: $bt"
+            "$bt" dump resources noiseinternet-debug.apk 2>/dev/null | grep -F "$NI_BUILD_STAMP" | head -3
+            "$bt" dump resources noiseinternet-debug.apk 2>/dev/null | grep -qF "$NI_BUILD_STAMP" \
+              || { echo "MISSING: the APK's resources do not contain the app build stamp $NI_BUILD_STAMP"; exit 1; }
+            for so in arm64-v8a x86_64; do
+              if unzip -p noiseinternet-debug.apk "lib/$so/libnoiseinternet_jni.so" | grep -aqF "$NI_BUILD_STAMP"; then
+                echo "lib/$so/libnoiseinternet_jni.so contains the stamp"
+              else
+                echo "MISSING: lib/$so/libnoiseinternet_jni.so does not contain the build stamp $NI_BUILD_STAMP"
+                exit 1
+              fi
+            done
+            "$bt" dump badging noiseinternet-debug.apk 2>/dev/null | grep -m2 -E "versionCode|versionName" || true
+            echo "build stamp $NI_BUILD_STAMP verified: in the APK's resources and in both native libraries"
+          } 2>&1 | tee -a android.log
+          grep -q "verified: in the APK's resources" android.log || exit 1
           unzip -l noiseinternet-debug.apk | sed -n '1,30p'
           unzip -l noiseinternet-debug.apk | grep -qE 'lib/(arm64-v8a|x86_64)/libnoiseinternet_jni.so' \
             || { echo "APK contains no native core - that is a build failure, not a success"; exit 1; }
@@ -140,7 +154,7 @@ jobs:
             echo "## android build failed (CI)"
             echo '```'
             if [ -f android.log ]; then
-              grep -nE "(error:|^e: |FAILURE:|What went wrong|CMake Error|Could not|not found|undefined reference|FAILED|No such file|command not found)" android.log | head -25
+              grep -nE "(error:|^e: |FAILURE:|What went wrong|CMake Error|Could not|MISSING|not found|undefined reference|FAILED|No such file|command not found)" android.log | head -25
               echo "--- tail ---"
               tail -15 android.log
             else
