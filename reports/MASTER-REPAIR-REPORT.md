@@ -378,3 +378,82 @@ errors — a signal that is not the modem's). The next single action is on the P
 That answer decides the next move: if the recording now holds a burst and reports `DECODES this recording`,
 the PC path works and the problem is the room/gain; if it says the microphone delivered nothing, the capture
 endpoint is the blocker and the audio line will name it.
+
+---
+
+# Round 6 — "rebuild everything from scratch, make sure both sides match and can carry internet"
+
+## What was asked, and what each part becomes
+
+| the request | what this round did |
+|---|---|
+| rebuild both artifacts from scratch | every job was re-run from a clean checkout on the final commit; all four CI jobs pass, and the release is republished from that commit with per-file sha256 |
+| make sure both sides match | both panels now print this end's **profile, session id and sample rate together** with "must be identical on both ends"; the engine's advice sentence repeats them; and the Android panel prints the session id it is actually running (it was on neither screen before) |
+| ...can actually send/receive internet | not claimed, and it cannot be claimed from here: no message has crossed real air. What *was* done is removing the two reasons a working build looks broken — a fresh signing key per build (so the new APK would not install) and no way to tell which build was running — plus the volume/route plumbing that decides whether one end can physically hear the other |
+| make everything new | the engine, both front ends and the CI were all touched here (see the file list), and the artifacts are built from the round-6 commit, not carried over |
+
+## The two things that most likely made the last build look broken
+
+1. **The APK could not be installed over the previous one.** Every CI run up to round 5 signed with a
+   freshly generated debug key on the runner; Android refuses an update signed by a different key. Tapping
+   the new APK gave an install error, not a new app.
+   *Now:* a committed debug key (`android/ci-debug.p12`, documented, public on purpose, release builds
+   deliberately unsigned) and `versionCode` = the CI run number, so updates install over each other.
+2. **Nothing said which build was running**, so "the fix did not work" could not be answered.
+   *Now:* `NI_BUILD_STAMP` is compiled into the engine and printed by everything: the Windows title bar,
+   the first status line, `ni audit`, and the Android report (`build: engine r6-50  app 0.6-ci.50`). CI
+   refuses to publish unless the stamp is greppable inside the shipped executables, the APK's resources
+   and both native libraries.
+
+## The plumbing that decides whether one end can hear the other
+
+- **Volume:** Windows reads each endpoint's volume and raises a speaker below 50 % to 85 % for the session,
+  restoring it on Stop; Android does the same for media volume. Both report it. The round-5 PC recording
+  had its loudest event 7 dB above the room — indistinguishable from a nearly silent speaker, and nothing
+  in the app said what the volume was.
+- **Route:** both apps warn in words when the audio is going to a headset/Bluetooth/USB/HDMI device.
+- **Devices:** the Windows audio line names both endpoints by their Windows friendly names and sizes.
+- **Recording:** the 8-second recorder captures what the engine received (not a second reader on the same
+  microphone), keeps the whole window, and says exactly where it saved the file.
+
+## Files changed
+
+`git diff --stat 4c13570..HEAD` — plus `android/ci-debug.p12` and `android/app/NOTICE-ci-debug-key.md`
+(new). Core, both front ends, both build files and the CI workflow.
+
+## Tests run, and their results
+
+| what | result |
+|---|---|
+| `ctest` on Linux | 11/11 pass, with the build stamp compiled in |
+| two-way link test (`--profile 11 --snr 35 --bytes 30`) | `directions_verified: 2` |
+| `scripts/check_frontend_parity.py` | PASS, 20 checks |
+| CI: core-linux / android / windows / release | all four **success**; MSVC 10/10 tests; `--ui-check` PASSED (32 controls, layout audit clean) |
+| stamp inside the artifacts | verified by CI: `r6-50` found in `NoiseInternet.exe`, `ni.exe`, the APK's resources and both `libnoiseinternet_jni.so` |
+
+## Deliverables, labelled
+
+| deliverable | label | evidence |
+|---|---|---|
+| `noiseinternet-debug.apk` (r6-50) | **PARTIAL** | compiled, stamped, stamp verified inside the APK; debug-signed with the committed key; **not installed on a phone by this host** |
+| `NoiseInternet.exe` + zip (r6-50) | **PARTIAL** | compiled on MSVC, 10/10 tests, `--ui-check` PASSED; unsigned; **not run on Windows by this host** |
+| both sides matching | **PARTIAL** | the numbers are now on both panels and the engine repeats them; only a two-machine run proves a human can compare them |
+| volume/route self-tuning | **PARTIAL** | implemented and unit-checked to the extent the build host can; needs one real machine |
+| copy button (Android) | **PARTIAL** | defect found and fixed twice (wrong pane; then the pre-start path); guarded by the parity check; needs one field report |
+| two-way acoustic link, modelled channel | **PASS (software)** | `directions_verified: 2`, payload SHA-256 compared both ways, now a ctest |
+| two-way link over air | **NOT TESTED** | no audio hardware anywhere in this environment |
+| send/receive internet end to end | **NOT TESTED** | depends on the leg above; no claim is made |
+
+## The one next action (PC, five minutes)
+
+Start the new EXE as **GIVER** (profile 10, session 7, the same passphrase as the phone), press **Record
+8 s and analyse** and send back four lines:
+
+1. the title bar's `[r6-50]` stamp (so we both know it is this build),
+2. `kept N of 384000 samples …`,
+3. `saved as <path>` (or `NOT SAVED - <reason>`),
+4. the `audio:` line from the status panel — it now names the microphone Windows actually opened and the
+   speaker volume it is using.
+
+That single reply decides the next move: it separates "the microphone hears nothing" from "the speaker is
+whispering" from "the room is fine and the modem needs work".
