@@ -93,6 +93,18 @@ class AudioEngine(
     private var outBufFrames = 0
     @Volatile
     private var inBufFrames = 0
+    // Media volume, and whether this app changed it. A phone whose media volume is at 20 % is a speaker
+    // the other device's microphone cannot hear, and nothing in the app said what the volume was: the
+    // round-5 field run had no way to tell "the PC never heard it" from "the phone whispered". Raised for
+    // the session when it is below half, put back by stop() - the same rule as the Windows side.
+    @Volatile
+    private var volBefore = -1
+    @Volatile
+    private var volRaised = false
+    @Volatile
+    private var volNow = -1
+    @Volatile
+    private var volMax = -1
 
     // Set by the capture thread: `capOpen` once a recorder is really recording, `capDead` once every
     // source/encoding combination on the device has been refused. start() waits briefly on these so a
@@ -211,6 +223,22 @@ class AudioEngine(
         running.set(true)
         outRate = if (Build.VERSION.SDK_INT >= 23) t.sampleRate else sampleRate
         outBufFrames = if (Build.VERSION.SDK_INT >= 23) t.bufferSizeInFrames else outFrames
+        // Self-tuning, once, and reversible: see volBefore.
+        try {
+            volMax = mgr.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+            volNow = mgr.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            volBefore = volNow
+            if (volMax > 0 && volNow * 100 / volMax < 50) {
+                val want = (volMax * 85) / 100
+                mgr.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, want, 0)
+                val back = mgr.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                volRaised = back > volNow
+                volNow = back
+            }
+        } catch (e: Exception) {
+            lastError = "media volume could not be read or raised (${e.javaClass.simpleName}) - if the " +
+                "other device cannot hear this one, raise the volume by hand"
+        }
 
         prefInput = input
         capFrames = frames
@@ -472,6 +500,15 @@ class AudioEngine(
 
     fun stop() {
         running.set(false)
+        // Put the media volume back where it was found before the track is released: a self-tuning app must
+        // not leave a user's phone louder than it found it.
+        if (volRaised && volBefore >= 0) {
+            try {
+                mgr.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, volBefore, 0)
+                volNow = mgr.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            } catch (e: Exception) { }
+            volRaised = false
+        }
         try { inThread?.join(200) } catch (e: InterruptedException) { }
         try { outThread?.join(200) } catch (e: InterruptedException) { }
         inThread = null
@@ -533,6 +570,24 @@ class AudioEngine(
         append(", playback route ").append(routedOutput)
         if (outBufFrames > 0) append(", playback buffer ").append(outBufFrames)
             .append(" frames (").append(maxOf(1, outBufFrames / 48)).append(" ms)")
+        if (volNow >= 0 && volMax > 0) {
+            append(", media volume ").append(volNow * 100 / volMax).append("% of max")
+            if (volRaised && volBefore >= 0)
+                append(" [raised from ").append(volBefore * 100 / volMax)
+                    .append("% for this session; put back on Stop]")
+        }
+        // The trap that makes a perfect modem inaudible: with a headset or a Bluetooth speaker connected,
+        // Android routes the tones there and the room hears nothing. The route name already says where the
+        // sound goes; this says what it means.
+        val out = routedOutput
+        if (out.contains("headset", true) || out.contains("headphone", true) ||
+            out.contains("bluetooth", true) || out.contains("usb", true) ||
+            out.contains("hdmi", true)
+        ) {
+            append(", PLEASE NOTE: the sound is going to \"").append(out)
+                .append("\" - not to the room. Unplug it (or pick the built-in speaker) if the other ")
+                .append("device has to hear this one.")
+        }
         if (underruns >= 0) append(", track underruns ").append(underruns)
             .append(if (outWrites > 0) " of " + outWrites + " writes (" +
                 pct(underruns, outWrites) + "%)" else "")

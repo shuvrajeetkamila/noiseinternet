@@ -9,6 +9,7 @@
 
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <endpointvolume.h>   // IAudioEndpointVolume: the Windows volume of each endpoint (round 6)
 #include <functiondiscoverykeys_devpkey.h>
 #include <propsys.h>   // PropVariantClear
 #include <mmreg.h>     // SPEAKER_* channel-mask constants
@@ -174,12 +175,16 @@ struct WasapiEngine::Impl {
     WAVEFORMATEXTENSIBLE fmt;
     int ch = 1;
     int buf = 0;
+    IAudioEndpointVolume* vol = nullptr;   // shared-mode volume/mute control for this endpoint
     // The endpoint that was actually opened, by its Windows friendly name. The status panel printed the
     // channel counts and buffer sizes but never WHICH device was in use, so a machine with several
     // microphones could not tell whether Windows picked the one the user plugged in (defect I).
     std::string name;
   };
   Side render, capture;
+  // Set by open(): the render volume the engine found, and whether it changed it (restored by close()).
+  bool vol_changed = false;
+  double vol_before_pct = -1.0;
   ~Impl() { stop(); }
   void stop() {
     if (render.ac) render.ac->Stop();
@@ -188,6 +193,8 @@ struct WasapiEngine::Impl {
     if (capture.cc) { capture.cc->Release(); capture.cc = nullptr; }
     if (render.ac) { render.ac->Release(); render.ac = nullptr; }
     if (capture.ac) { capture.ac->Release(); capture.ac = nullptr; }
+    if (render.vol) { render.vol->Release(); render.vol = nullptr; }
+    if (capture.vol) { capture.vol->Release(); capture.vol = nullptr; }
     if (render.dev) { render.dev->Release(); render.dev = nullptr; }
     if (capture.dev) { capture.dev->Release(); capture.dev = nullptr; }
     if (render.ev) { CloseHandle(render.ev); render.ev = nullptr; }
@@ -232,6 +239,14 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
   // Named here, where the endpoint has just been chosen, and never guessed later.
   s.name = friendly_name(s.dev);
   if (s.name.empty()) s.name = id.empty() ? "(system default)" : id;
+  // Volume, if this endpoint offers it. Not fatal when it does not: the level is a diagnostic, and a
+  // machine that will not report it must not lose its audio over it.
+  {
+    IAudioEndpointVolume* vol = nullptr;
+    HRESULT vhr = s.dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                  reinterpret_cast<void**>(&vol));
+    if (SUCCEEDED(vhr) && vol) s.vol = vol;
+  }
   HRESULT hr = s.dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                                reinterpret_cast<void**>(&s.ac));
   if (FAILED(hr) || !s.ac) {
@@ -387,10 +402,35 @@ int WasapiEngine::open(const std::string& render_id, const std::string& capture_
   capture_ch_ = p_->capture.ch;
   render_buf_ = p_->render.buf;
   capture_buf_ = p_->capture.buf;
+
+  // Self-tuning, once, and reversible. A WASAPI shared-mode stream plays at the endpoint's own volume, so
+  // a speaker slider left at 20 % is a modem nobody in the room can hear - and on the two field runs the
+  // PC's own recording sat 7 dB above the room, which is what a nearly-inaudible speaker looks like in a
+  // level meter. If the render volume is below half, it is raised for the session and put back on Stop
+  // (see close()): loud enough to be heard, and never left changed behind the user's back.
+  if (p_->render.vol) {
+    float sc = 0.0f;
+    BOOL mute = FALSE;
+    if (SUCCEEDED(p_->render.vol->GetMasterVolumeLevelScalar(&sc)) &&
+        SUCCEEDED(p_->render.vol->GetMute(&mute))) {
+      const double pct = 100.0 * (double)sc;
+      p_->vol_before_pct = pct;
+      if (pct < 50.0 || mute) {
+        if (mute) p_->render.vol->SetMute(FALSE, nullptr);
+        if (SUCCEEDED(p_->render.vol->SetMasterVolumeLevelScalar(0.85f, nullptr)))
+          p_->vol_changed = true;
+      }
+    }
+  }
   return NI_OK;
 }
 
 void WasapiEngine::close() {
+  // Put the speaker volume back where it was found, before the endpoint's interfaces are released.
+  if (p_ && p_->vol_changed && p_->render.vol && p_->vol_before_pct >= 0.0) {
+    p_->render.vol->SetMasterVolumeLevelScalar((float)(p_->vol_before_pct / 100.0), nullptr);
+    p_->vol_changed = false;
+  }
   if (p_) p_->stop();
   fs_ = render_ch_ = capture_ch_ = render_buf_ = capture_buf_ = 0;
 }
@@ -492,6 +532,79 @@ int WasapiEngine::capture(float* mono, int frames) {
   }
 }
 
+bool WasapiEngine::read_volumes(double* render_pct, bool* render_muted, double* capture_pct,
+                                bool* capture_muted) const {
+  if (!p_) return false;
+  bool any = false;
+  if (p_->render.vol) {
+    float sc = 0.0f;
+    BOOL m = FALSE;
+    if (SUCCEEDED(p_->render.vol->GetMasterVolumeLevelScalar(&sc)) &&
+        SUCCEEDED(p_->render.vol->GetMute(&m))) {
+      if (render_pct) *render_pct = 100.0 * (double)sc;
+      if (render_muted) *render_muted = (m != FALSE);
+      any = true;
+    }
+  }
+  if (p_->capture.vol) {
+    float sc = 0.0f;
+    BOOL m = FALSE;
+    if (SUCCEEDED(p_->capture.vol->GetMasterVolumeLevelScalar(&sc)) &&
+        SUCCEEDED(p_->capture.vol->GetMute(&m))) {
+      if (capture_pct) *capture_pct = 100.0 * (double)sc;
+      if (capture_muted) *capture_muted = (m != FALSE);
+      any = true;
+    }
+  }
+  return any;
+}
+
+bool WasapiEngine::set_render_volume_pct(double pct) {
+  if (!p_ || !p_->render.vol) return false;
+  if (pct < 0.0) pct = 0.0;
+  if (pct > 100.0) pct = 100.0;
+  return SUCCEEDED(p_->render.vol->SetMasterVolumeLevelScalar((float)(pct / 100.0), nullptr));
+}
+
+double WasapiEngine::render_volume_before() const {
+  return (p_ && p_->vol_changed) ? p_->vol_before_pct : -1.0;
+}
+
+static std::string volumes_text(const WasapiEngine::Impl& im) {
+  // One sentence per endpoint: percentage, and the mute flag spelled out. Silence has two causes - a
+  // slider at zero and a muted endpoint - and they look identical in a level meter.
+  char buf[256];
+  double rp = -1, cp = -1;
+  bool rm = false, cm = false;
+  bool any = false;
+  if (im.render.vol) {
+    float sc = 0.0f;
+    BOOL m = FALSE;
+    if (SUCCEEDED(im.render.vol->GetMasterVolumeLevelScalar(&sc)) &&
+        SUCCEEDED(im.render.vol->GetMute(&m))) {
+      rp = 100.0 * (double)sc;
+      rm = (m != FALSE);
+      any = true;
+    }
+  }
+  if (im.capture.vol) {
+    float sc = 0.0f;
+    BOOL m = FALSE;
+    if (SUCCEEDED(im.capture.vol->GetMasterVolumeLevelScalar(&sc)) &&
+        SUCCEEDED(im.capture.vol->GetMute(&m))) {
+      cp = 100.0 * (double)sc;
+      cm = (m != FALSE);
+      any = true;
+    }
+  }
+  if (!any) return "volume: this endpoint does not report one";
+  _snprintf(buf, sizeof(buf),
+            "volume: speaker %.0f%%%s, microphone %.0f%%%s", rp,
+            rm ? " (MUTED - unmute it, or nothing can be heard)" : "", cp,
+            cm ? " (MUTED - Windows is dropping every sample)" : "");
+  return std::string(buf);
+}
+
 std::string WasapiEngine::describe() const {
   // Names first: "which speaker, which microphone" is the question a field test has to answer, and it was
   // the one thing this line did not say (defect I).
@@ -502,7 +615,18 @@ std::string WasapiEngine::describe() const {
             p_ && !p_->render.name.empty() ? p_->render.name.c_str() : "(not open)", render_ch_, render_buf_,
             p_ && !p_->capture.name.empty() ? p_->capture.name.c_str() : "(not open)", capture_ch_,
             capture_buf_, fs_, capture_silent_ ? " - THE CAPTURE ENDPOINT IS SILENT (muted or removed)" : "");
-  return std::string(buf);
+  std::string out(buf);
+  if (p_) {
+    out += ", ";
+    out += volumes_text(*p_);
+    if (p_->vol_changed && p_->vol_before_pct >= 0.0) {
+      char b2[96];
+      _snprintf(b2, sizeof(b2), " [raised from %.0f%% for this session; put back on Stop]",
+                p_->vol_before_pct);
+      out += b2;
+    }
+  }
+  return out;
 }
 
 }  // namespace ni

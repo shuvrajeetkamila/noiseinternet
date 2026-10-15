@@ -27,6 +27,9 @@ WINDOWS_GUI = ROOT / "windows/src/NoiseInternet/gui_main.cpp"
 ANDROID_LAYOUT = ROOT / "android/app/src/main/res/layout/activity_main.xml"
 ANDROID_MAIN = ROOT / "android/app/src/main/java/com/noiseinternet/app/MainActivity.kt"
 ANDROID_SERVICE = ROOT / "android/app/src/main/java/com/noiseinternet/core/NoiseService.kt"
+# The Android audio layer: volumes, routes and buffer sizes live here, and a capability in this file is a
+# capability the phone has - the checks below read it for the same reason they read the Windows backend.
+ANDROID_AUDIO = ROOT / "android/app/src/main/java/com/noiseinternet/core/AudioEngine.kt"
 
 # name -> (what it is for, windows regex, android regexes over layout + kotlin)
 CHECKS = [
@@ -71,6 +74,19 @@ CHECKS = [
     # Defect F: a number the engine never measured must not be printed as a reading on either platform.
     ("not-measured wording", "both front ends must obey the measured flags instead of printing defaults",
      r"phy_measured", [r"phyMeasured", r"arqMeasured"]),
+    # Round 6: "did not work" was unanswerable because neither app said which build it was, and because
+    # the three numbers the two ends must agree on were not all on screen.
+    ("build stamp shown", "the report must say which build is running (both halves)",
+     r"NI_BUILD_STAMP", [r"st\.build", r"appStamp", r"ni_build_stamp"]),
+    ("session id shown", "the session id is one of the three numbers both ends must match",
+     r"session %d", [r"st\.sessionId"]),
+    # Round 6: a speaker volume at 20 % is a modem nobody can hear, on either platform.
+    # The Windows volume methods live in the WASAPI backend, not in gui_main.cpp, so this check reads that
+    # file too - the whole point is that the capability exists on both platforms, wherever it lives.
+    ("volume self-tuning", "the app must know and, if needed, raise its own output volume",
+     r"set_render_volume_pct|render_volume_before", [r"getStreamVolume", r"setStreamVolume"]),
+    ("audio route warning", "a headset/Bluetooth route means the room hears nothing",
+     r"volumes_text|render_volume_before", [r"PLEASE NOTE: the sound is going to"]),
 ]
 
 def read(path: Path) -> str:
@@ -81,13 +97,18 @@ def read(path: Path) -> str:
 
 def main() -> int:
     win = read(WINDOWS_GUI)
+    # The Windows audio backend is a separate translation unit; a capability that exists there is a
+    # capability the Windows front end has, and the checks below must be able to see it.
+    win_audio = read(ROOT / "windows/src/NoiseInternet/audio_wasapi.cpp")
+    win = win + "\n" + win_audio
     lay = read(ANDROID_LAYOUT)
     act = read(ANDROID_MAIN)
     svc = read(ANDROID_SERVICE)
-    android = lay + "\n" + act + "\n" + svc
+    aud = read(ANDROID_AUDIO)
+    android = lay + "\n" + act + "\n" + svc + "\n" + aud
 
     print(f"windows: {WINDOWS_GUI.relative_to(ROOT)} ({len(win)} bytes)")
-    print(f"android: {ANDROID_LAYOUT.relative_to(ROOT)} + MainActivity.kt + NoiseService.kt "
+    print(f"android: {ANDROID_LAYOUT.relative_to(ROOT)} + MainActivity.kt + NoiseService.kt + AudioEngine.kt "
           f"({len(android)} bytes)")
     print()
     print(f"{'control':<22} {'windows':<9} {'android':<9} why")

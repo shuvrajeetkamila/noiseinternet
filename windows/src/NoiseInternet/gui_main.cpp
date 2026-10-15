@@ -617,6 +617,7 @@ struct App {
       node.reset();
       return false;
     }
+    say(fmt(L"this build: engine %hs, window %hs", NI_BUILD_STAMP, L"NOISE INTERNET for Windows"));
     say(w8(audio->describe()));
     say(fmt(L"started as %ls, profile id %d, session %u, proxy %ls",
             cfg.role == NI_ROLE_GIVER ? L"GIVER" : L"RECEIVER", cfg.profile_id, (unsigned)cfg.session_id,
@@ -671,7 +672,13 @@ struct App {
       return;
     }
     std::wstring t;
-    t += fmt(L"role %hs   state %hs   session %lld ms\r\n", s.role.c_str(), s.state_name.c_str(),
+    // The three numbers the two ends must agree on, first, before anything measured: profile, session and
+    // rate. They were in three different places (or nowhere: the session id was not on this panel at all),
+    // and "make sure both sides match" cannot be done by eye if the numbers are not on the screen.
+    t += fmt(L"build %hs (engine)\r\n", s.build.c_str());
+    t += fmt(L"profile %d (%hs)   session %d   %.0f Hz   <- all three must be identical on both ends\r\n",
+             s.profile_id, s.profile_name.c_str(), s.session_id, s.sample_rate);
+    t += fmt(L"role %hs   state %hs   running for %lld ms\r\n", s.role.c_str(), s.state_name.c_str(),
              (long long)s.session_ms);
     t += fmt(L"peer %hs (last heard %lld ms ago)   pairing %hs\r\n",
              s.peer_online ? "ONLINE" : "offline", (long long)s.peer_seen_ms, s.pairing.c_str());
@@ -1089,8 +1096,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   RegisterClassExW(&wc);
   RECT r = {0, 0, 620, 660};   // the client area the controls above are laid out for
   AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
-  HWND hwnd = CreateWindowExW(0, wc.lpszClassName,
-                              L"Noise Internet - acoustic link (nothing measured over air yet)",
+  // The title carries the build stamp: it is the one string a user can read (or screenshot) without
+  // opening anything, and it answers "am I running the new build?" - the question the round-5 report could
+  // not answer about the phone.
+  std::wstring title = fmt(L"Noise Internet [%hs] - acoustic link (nothing measured over air yet)",
+                           NI_BUILD_STAMP);
+  HWND hwnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(),
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
                               r.right - r.left, r.bottom - r.top, nullptr, nullptr,
                               GetModuleHandleW(nullptr), nullptr);

@@ -11,6 +11,14 @@ android {
 
     defaultConfig {
         applicationId = "com.noiseinternet.app"
+        // Both of these are visible in the app: versionName on the Android app-info screen, and the stamp
+        // below inside the report itself. "Did not work" could not be answered while nobody could tell
+        // whether the phone was running the build that had just been published (round 6). CI passes the
+        // run number so every published build has a higher versionCode than the last, which also means
+        // Android will update the app rather than refuse the install.
+        versionCode = (System.getenv("NI_VERSION_CODE") ?: "6").toIntOrNull() ?: 6
+        versionName = (System.getenv("NI_VERSION_NAME") ?: "0.6-debug")
+        resValue("string", "ni_build_stamp", (System.getenv("NI_BUILD_STAMP") ?: "local build (no CI stamp)"))
         // 23: AudioRecord/AudioTrack setPreferredDevice and getDevices(); the native core itself is
         // plain C++17 and needs nothing from a specific API level.
         minSdk = 23
@@ -23,6 +31,9 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_shared", "-DCMAKE_BUILD_TYPE=RelWithDebInfo")
+                // The core's own stamp travels to the panel through the status JSON, so the app shows two
+                // build strings: this one (the C++ engine) and the APK's own resValue above.
+                arguments += listOf("-DNI_BUILD_STAMP=${System.getenv("NI_BUILD_STAMP") ?: "local build (no CI stamp)"}")
                 cppFlags += listOf("-std=c++17", "-Wall", "-Wextra", "-fno-strict-aliasing")
             }
         }
@@ -35,13 +46,35 @@ android {
         }
     }
 
+    signingConfigs {
+        // A COMMITTED DEBUG KEY, on purpose.
+        //
+        // Until round 6 every CI run let the Android Gradle plugin generate `~/.android/debug.keystore` on
+        // the runner, which means a brand-new random keypair per build. Android refuses to install an APK
+        // whose signature differs from the installed app ("App not installed" / "package conflicts"), so
+        // each published APK could only be installed after uninstalling the previous one - and the user
+        // reported "did not work" with no way to tell whether that, or the app, was the problem.
+        //
+        // This key is a *debug* key and is deliberately public: it signs nothing but debug builds of an
+        // app that is not on any store, and its whole purpose is that build N+1 installs over build N.
+        // It must never be used for a release build: see the release block below and NOTICE-ci-debug-key.md.
+        create("ciDebug") {
+            storeFile = file("../ci-debug.p12")
+            storeType = "PKCS12"
+            storePassword = "noiseinternet"
+            keyAlias = "noiseinternetci"
+            keyPassword = "noiseinternet"
+        }
+    }
+
     buildTypes {
         debug {
-            // Signed with the Android debug keystore by the Gradle plugin. That is a *local* signature:
-            // it lets `adb install` run this build. It is not a release signature, and nothing in this
-            // repository claims otherwise - and on the machine where this code was written, no APK was
-            // produced at all, so not even this applies until you build it yourself.
+            // Signed with the committed CI debug key when it is present (it is in this repository), so
+            // successive builds install over each other. That is still a *local* signature: it is not a
+            // release signature and this app is not published anywhere.
             isMinifyEnabled = false
+            val ci = signingConfigs.findByName("ciDebug")
+            if (ci?.storeFile?.exists() == true) signingConfig = ci
         }
         release {
             isMinifyEnabled = false

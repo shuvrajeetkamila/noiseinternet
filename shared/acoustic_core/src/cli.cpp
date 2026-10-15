@@ -820,6 +820,9 @@ int cmd_audit(const Opts&) {
   printf("NOISE INTERNET environment audit\n");
   printf("  protocol version      : %d\n", NI_PROTO_VERSION);
   printf("  binary build          : %s %s\n", __DATE__, __TIME__);
+  // Which build this is (see NI_BUILD_STAMP): the same string the two front ends print, so "am I running
+  // the build that was just published" has one answer everywhere.
+  printf("  build stamp           : %s\n", NI_BUILD_STAMP);
   printf("  modulation profiles   : %d\n", ni_profile_count());
   printf("  frame/PDU limits      : frame<=%d B  payload<=%d B  PDU<=%d B\n", NI_MAX_FRAME,
          NI_MAX_PAYLOAD, NI_MAX_BURST_PDU);

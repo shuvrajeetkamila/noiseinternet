@@ -36,5 +36,13 @@ target_include_directories(noiseinternet_jni PRIVATE
 # and pushed through ni_abi_feed_pcm / ni_abi_pull_pcm. There is deliberately no native AAudio backend
 # in this tree - writing one would duplicate a data path that has never been compared against the Java
 # one, and the point of the C ABI is that both platforms share one core.
+# Which build of the engine this is (see NI_BUILD_STAMP in common.h). Gradle passes it from the CI
+# environment; it reaches the phone's screen through the status JSON, so "am I running the new build?"
+# is answerable by looking at the app instead of guessing.
+if(NOT DEFINED NI_BUILD_STAMP)
+  set(NI_BUILD_STAMP "local build (no CI stamp)")
+endif()
+target_compile_definitions(noiseinternet_jni PRIVATE NI_BUILD_STAMP="${NI_BUILD_STAMP}")
+
 target_compile_options(noiseinternet_jni PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(noiseinternet_jni PRIVATE log m)

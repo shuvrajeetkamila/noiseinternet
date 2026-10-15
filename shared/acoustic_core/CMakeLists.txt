@@ -13,6 +13,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(NI_BUILD_TESTS "Build the automated test suite" ON)
 option(NI_USE_LIBSODIUM "Use libsodium for AEAD/HMAC instead of the vendored implementation" OFF)
 option(NI_BUILD_SHARED "Also build a shared library (used by the WASM and JNI shells)" OFF)
+# Which build this is. The front ends print it (status JSON field "build"), so a user can tell whether the
+# app they are holding is the build that was just published. CI passes -DNI_BUILD_STAMP=<short sha>.
+set(NI_BUILD_STAMP "local build (no CI stamp)" CACHE STRING "Build stamp shown by the front ends")
 
 if(POLICY CMP0076)
   cmake_policy(SET CMP0076 NEW)
@@ -43,6 +46,7 @@ set(NI_SOURCES
 
 add_library(ni_core STATIC ${NI_SOURCES})
 target_include_directories(ni_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(ni_core PUBLIC NI_BUILD_STAMP="${NI_BUILD_STAMP}")
 target_compile_options(ni_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 if(NOT MSVC)
   target_compile_options(ni_core PRIVATE -fno-strict-aliasing)

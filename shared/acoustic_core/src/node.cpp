@@ -606,6 +606,18 @@ int Node::test_internet(int64_t now, const std::string& url, InternetVerify* out
 // The panel sentence. Written once here so the Windows window, the console and the Android panel all
 // say the same thing about the same numbers; the alternative is three UIs each guessing, which is how
 // "it does not work" survives three builds.
+// The three numbers the two ends must agree on, in the words of whichever end is asking. A person holding
+// two devices cannot compare what neither screen shows, and "both ends must match" was advice the panels
+// made impossible to follow: the session id was not printed anywhere and the sample rate only in some
+// builds (round 6, "make sure both sides match").
+static std::string this_ends_numbers(const StatusSnapshot& s) {
+  std::ostringstream n;
+  n << " THIS end is running profile " << s.profile_id << " (" << s.profile_name << "), session "
+    << s.session_id << ", " << (long)(s.sample_rate + 0.5) << " Hz - the other device must show the SAME "
+       "three numbers, or nothing can decode.";
+  return n.str();
+}
+
 static std::string status_advice(const StatusSnapshot& s) {
   std::ostringstream o;
   if (!s.running) {
@@ -634,7 +646,8 @@ static std::string status_advice(const StatusSnapshot& s) {
       o << "the microphone hears only a very quiet room (" << (int)(s.in_dbfs + 0.5)
         << " dBFS) and no bursts. Move the two devices 20-30 cm apart, raise the other device's " \
            "volume, and make sure it is started as GIVER - a receiver stays silent until it hears " \
-           "something.";
+           "something."
+        << this_ends_numbers(s);
       return o.str();
     }
     if (s.in_dbfs > -10.0) {
@@ -644,9 +657,9 @@ static std::string status_advice(const StatusSnapshot& s) {
       return o.str();
     }
     o << "the microphone hears the room (" << (int)(s.in_dbfs + 0.5)
-      << " dBFS) but no bursts decode: check that the other device is running as GIVER, that both " \
-         "ends show the SAME profile number and session id, and that no Bluetooth headset or speaker " \
-         "is in the path.";
+      << " dBFS) but no bursts decode: check that the other device is running as GIVER and that no "
+         "Bluetooth headset or speaker is in the path."
+      << this_ends_numbers(s);
     return o.str();
   }
   // Self-echo is a measured fact now, not an inference: the link compares every burst it decodes with
@@ -664,20 +677,23 @@ static std::string status_advice(const StatusSnapshot& s) {
          "from any other device. Speaker, microphone, profile and modem all work on THIS end - the " \
          "proof is that it hears itself clearly enough to decode itself. What has not happened is the " \
          "other device being heard at all: check that it is started, that it is transmitting (a " \
-         "receiver is silent until it hears something), that it uses the SAME profile number and " \
-         "session id, and that its speaker actually faces this microphone.";
+         "receiver is silent until it hears something), and that its speaker actually faces this " \
+         "microphone."
+      << this_ends_numbers(s);
     return o.str();
   }
   if (s.frames_received == 0) {
     o << "bursts are arriving and their sync is found, but nothing decodes ("  << s.sync_hits
       << " so far): the two ends most likely disagree on the profile number, the session id or the " \
-         "passphrase. Both numbers are shown on this panel - make them identical on both devices.";
+         "passphrase."
+      << this_ends_numbers(s);
     return o.str();
   }
   o << "frames are decoding (" << s.frames_received
     << " so far) but pairing has not completed: compare the passphrases - both ends must have the " \
        "SAME passphrase, at least 8 characters. The match code appears on this panel as soon as " \
-       "pairing succeeds.";
+       "pairing succeeds."
+    << this_ends_numbers(s);
   return o.str();
 }
 
@@ -743,6 +759,8 @@ StatusSnapshot Node::snapshot() const {
   StatusSnapshot s;
   s.name = cfg_.name;
   s.role = ni_role_name(cfg_.role);
+  s.build = NI_BUILD_STAMP;
+  s.session_id = (int)cfg_.session_id;
   s.state = link_ ? link_->state() : NI_ST_IDLE;
   s.state_name = ni_state_name(s.state);
   s.running = running_;
@@ -834,7 +852,8 @@ StatusSnapshot Node::snapshot() const {
 
 std::string StatusSnapshot::to_json() const {
   std::ostringstream o;
-  o << "{\"name\": \"" << name << "\", \"role\": \"" << role << "\", \"state\": " << state
+  o << "{\"name\": \"" << name << "\", \"role\": \"" << role << "\", \"build\": \"" << build
+    << "\", \"session_id\": " << session_id << ", \"state\": " << state
     << ", \"state_name\": \"" << state_name << "\", \"running\": " << (running ? "true" : "false")
     << ", \"profile\": \"" << profile_name << "\", \"profile_id\": " << profile_id
     << ", \"modulation\": \"" << modulation << "\", \"sample_rate\": " << sample_rate

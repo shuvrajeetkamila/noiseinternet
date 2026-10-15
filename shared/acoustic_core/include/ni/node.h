@@ -63,6 +63,13 @@ struct NodeConfig {
 
 struct StatusSnapshot {
   std::string name, role, state_name;
+  // Which build of the engine produced this snapshot (see NI_BUILD_STAMP in common.h), and the session id
+  // this node is running. Both are shown by the front ends: the stamp so a user can tell whether the app
+  // they are holding is the build that was just published, the session id because it is one of the three
+  // numbers the two ends must agree on and it was not visible on either panel ("both sides must match"
+  // cannot be checked by eye if the numbers are not on the screen).
+  std::string build;
+  int session_id = 0;
   // Pairing is part of the status a UI has to show, not an extra: the match code (SAS words) is the
   // only thing a human can compare between the two ends to know the "encrypted" claim means something.
   // The Windows GUI and the Android panel both read these, and the fields used to exist only inside the

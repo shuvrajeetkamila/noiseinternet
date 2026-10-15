@@ -14,6 +14,25 @@ between a useful evening and a confusing one.
 | `redist/` | `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`, copied unmodified from Microsoft's redistributable on the build machine. **The exe in this zip does not need them.** They are here so a build made with `-DNI_STATIC_RUNTIME=OFF` (the smaller, dynamically-linked variant) can run by dropping them next to it. See `NOTICE-redist.txt`. |
 | `BUILD-INFO.txt` | commit the binaries were built from, sizes, sha256 of every file in the zip, and the result of checking the exes' actual DLL imports. |
 
+## Which build am I running? (read this first when something "does not work")
+
+Both apps print the build they are, and they are supposed to match the release page you downloaded from:
+
+- **Windows:** the title bar of the window is `Noise Internet [r6-123] - ...`, and the first line of the
+  status panel is `build r6-123 (engine)`. Pressing Start also logs it.
+- **Android:** the first line of the report (the big pane, and the text the **Copy report** button
+  puts on the clipboard) is
+  `build: engine r6-123   app 0.6-ci.123   ...`.
+
+If those two strings are not the same build number, one of your two devices is running an older app and
+none of the fixes described below are in it. This exists because a round of fixes was reported as "did not
+work" when the copy on the phone was in fact the previous build — nothing on the screen said so.
+
+**Installing the APK over an older copy:** builds from before round 6 were signed with a fresh random key
+each time, so Android refuses to install the new one over the old one ("App not installed" / "package
+conflicts"). If you see that, uninstall **Noise Internet** once and install the new APK. From round 6 on
+every build uses the same (committed, debug-only) key, so later updates install over earlier ones.
+
 ## Who gives, who receives, and which way the bytes go
 
 This is the part people get wrong, so it is worth stating plainly.
@@ -193,7 +212,9 @@ know. The window itself still has no field for it (defect 27).
 | The window says *refused to start: the passphrase is N characters long* | that is the check working. Both ends need the same passphrase of 8+ characters; without one the engine never sends a pairing challenge. |
 | CRC failures and lots of retries | too loud or too far: the model has a ~26 dB receiver distortion floor (defect 20), and real AGC in phones makes that worse. Lower the volume a little and try again. |
 | Internet test fails at an early stage | the known state: the desktop proxy path does not pair (defect 21) and the Android tunnel carries no TCP. Which stage failed is the result — that is what the printout is for. |
-| A browser pointed at `127.0.0.1:8471` says it needs a password | correct: the local proxy uses `Proxy-Authorization: Noise <token>`, which browsers cannot send. Use the console build with `--proxy-token` and curl, as shown above. The window has no field for the token yet (defect 27). |
+| A browser pointed at `127.0.0.1:8471` says it needs a password | correct: the local proxy uses `Proxy-Authorization: Noise <token>`, which browsers cannot send. The window has a **proxy token** field and a **show secrets** checkbox; tick it to read the token, or use the console build with `--proxy-token` and curl, as shown above. |
+| The volume keeps changing while the app runs | that is the app, once, on purpose: if the output volume is below half it is raised to 85 % for the session and put back when you press Stop. The status panel says `volume: speaker 85%, microphone 100%`, and the copy in the log records the value it was raised from. |
+| The status panel says the sound is going to headphones/Bluetooth | that is the app catching the most expensive mistake in this project's history: with a headset connected, the tones go into your ear and the room hears nothing. Unplug it, or pick the built-in speaker. |
 | The window closes while a test is running | it will not: pressing Close during a link test waits for the result, because killing the engine mid-measurement would produce a number that means nothing. The tests are bounded (the link test gives up after ~12 s of silence). |
 
 ## Building it yourself instead of trusting the zip

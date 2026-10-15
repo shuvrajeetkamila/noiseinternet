@@ -24,6 +24,14 @@ env:
   ANDROID_BUILD_TOOLS: 34.0.0
   ANDROID_PLATFORM: android-34
   GRADLE_VERSION: 8.9
+  # Which build this is, compiled into the engine and printed by both front ends (common.h
+  # NI_BUILD_STAMP). "The fix did not work" is unanswerable when nobody can tell which build is running,
+  # which is exactly what round 5 could not answer about the phone.
+  NI_BUILD_STAMP: r6-${{ github.run_number }}
+  # Android's versionCode comes from the CI run number, so every published APK is a higher version than
+  # the last and the phone is willing to update rather than refusing the install.
+  NI_VERSION_CODE: ${{ github.run_number }}
+  NI_VERSION_NAME: 0.6-ci.${{ github.run_number }}
 
 jobs:
   # ---------------------------------------------------------------- Linux: the shared core and its tests
@@ -36,7 +44,8 @@ jobs:
       - name: Configure and build the shared core with tests
         run: |
           cmake -S shared/acoustic_core -B build-linux \
-            -DCMAKE_BUILD_TYPE=Release -DNI_BUILD_TESTS=ON -DNI_BUILD_SHARED=ON
+            -DCMAKE_BUILD_TYPE=Release -DNI_BUILD_TESTS=ON -DNI_BUILD_SHARED=ON \
+            -DNI_BUILD_STAMP="$NI_BUILD_STAMP"
           cmake --build build-linux -j 3
       - name: Unit tests (no audio hardware involved; these are the same targets ctest runs locally)
         working-directory: build-linux
@@ -100,6 +109,21 @@ jobs:
           test -n "$apk" || { echo "gradle said OK but no APK exists"; exit 1; }
           cp "$apk" noiseinternet-debug.apk
           echo "apk: noiseinternet-debug.apk ($(stat -c %s noiseinternet-debug.apk) bytes)"
+          # Both stamps have to be inside the APK: the Kotlin string resource (the app's own stamp) and the
+          # C++ macro compiled into libnoiseinternet_jni.so (the engine's). grep -a on the .so is a crude but
+          # decisive check that the NDK build really received -DNI_BUILD_STAMP.
+          unzip -p noiseinternet-debug.apk classes.dex | grep -aF "$NI_BUILD_STAMP" >/dev/null \
+            || { echo "the APK does not contain the app build stamp $NI_BUILD_STAMP in classes.dex"; exit 1; }
+          for so in arm64-v8a x86_64; do
+            unzip -p noiseinternet-debug.apk "lib/$so/libnoiseinternet_jni.so" | grep -aF "$NI_BUILD_STAMP" >/dev/null \
+              || { echo "lib/$so/libnoiseinternet_jni.so does not contain the build stamp"; exit 1; }
+          done
+          echo "build stamp $NI_BUILD_STAMP found in classes.dex and in both native libraries"
+          # And in the packaged resources, which is where the app reads its own stamp from.
+          bt=$(ls "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}"/build-tools/*/aapt2 2>/dev/null | head -1)
+          if [ -n "$bt" ]; then
+            "$bt" dump resources noiseinternet-debug.apk 2>/dev/null | grep -m2 -E "ni_build_stamp|versionName" || true
+          fi
           unzip -l noiseinternet-debug.apk | sed -n '1,30p'
           unzip -l noiseinternet-debug.apk | grep -qE 'lib/(arm64-v8a|x86_64)/libnoiseinternet_jni.so' \
             || { echo "APK contains no native core - that is a build failure, not a success"; exit 1; }
@@ -147,7 +171,7 @@ jobs:
       - name: Configure and build with MSVC
         shell: pwsh
         run: |
-          cmake -S windows -B build-windows *> cfg.log
+          cmake -S windows -B build-windows -DNI_BUILD_STAMP="$env:NI_BUILD_STAMP" *> cfg.log
           if ($LASTEXITCODE -ne 0) { Get-Content cfg.log; exit 2 }
           cmake --build build-windows --config Release -j 2 -- /v:minimal *> build.log
           if ($LASTEXITCODE -ne 0) { Get-Content build.log; exit 3 }
@@ -179,6 +203,11 @@ jobs:
             Copy-Item $f.FullName $out
             "pkg: staged $n ($((Get-Item "$out\$n").Length) B)" | Out-File -Append pkg.log
           }
+          # The stamp has to be *in* the shipped binary, not only in this log: run the shipped ni.exe and
+          # read the stamp back out of it.
+          $stamp_seen = ((& "$out\ni.exe" audit 2>&1 | Select-String -SimpleMatch "$env:NI_BUILD_STAMP") -ne $null)
+          "pkg: build stamp '$env:NI_BUILD_STAMP' present in the shipped ni.exe: $stamp_seen" | Out-File -Append pkg.log
+          if (-not $stamp_seen) { "pkg: the shipped ni.exe does not print this build's stamp - refusing to publish" | Out-File -Append pkg.log; exit 6 }
           Copy-Item packaging/windows/README-RUN.md $out
           Copy-Item packaging/windows/NOTICE-redist.txt "$out/redist/NOTICE-redist.txt"
           # Run the window itself, not just the linker. --ui-check creates the real top-level window,
@@ -196,6 +225,11 @@ jobs:
             $p.Kill()
             "pkg: ui-check TIMED OUT after 60 s and was killed - do not ship this exe unexamined" | Out-File -Append pkg.log
           }
+          # The window's own title carries the stamp; if it is in the linked exe, the title bar a user sees
+          # carries this build's number.
+          $in_exe = (Select-String -Path "$out\NoiseInternet.exe" -Pattern "$env:NI_BUILD_STAMP" -SimpleMatch -Quiet) -eq $true
+          "pkg: build stamp present in the linked NoiseInternet.exe: $in_exe" | Out-File -Append pkg.log
+          if (-not $in_exe) { "pkg: NoiseInternet.exe does not contain this build's stamp - refusing to publish" | Out-File -Append pkg.log; exit 7 }
           if (Test-Path "$out\ui-check.txt") {
             Get-Content "$out\ui-check.txt" | Out-File -Append -Encoding utf8 pkg.log
           } else {
@@ -365,9 +399,18 @@ jobs:
             echo
             echo "**Read this before installing anything.**"
             echo
-            echo "- The APK is signed with a **throwaway debug keystore created on this runner**; the key"
-            echo "  is destroyed when the runner is. It is not a release signature and it is not a"
-            echo "  Play-Store-published app."
+            echo "- **This is build \`$NI_BUILD_STAMP\`.** Both apps print it on screen: the EXE in the title"
+            echo "  bar and the first line of the status panel, the APK in the first line of the report under"
+            echo "  \`build: engine r6-N (app 0.6-ci.N)\`. If that string does not match this page, the phone or"
+            echo "  PC is running something older - which is the first thing to check when a fix 'does not work'."
+            echo "- The APK is signed with a **committed debug keystore** (\`android/ci-debug.p12\`, password and"
+            echo "  alias in \`android/app/build.gradle.kts\`), so build N+1 installs over build N without an"
+            echo "  uninstall. Until round 6 every run generated a fresh random key, which made Android refuse"
+            echo "  the install over an existing app. It is still only a debug key: not a release signature, not"
+            echo "  a Play-Store app, and it must never sign a release build."
+            echo "- **Installing over an older build from a previous release:** if Android says \`App not installed\`"
+            echo "  or \`package conflicts\`, uninstall the old NOISE INTERNET once and install this one. That"
+            echo "  should be the last time it is needed: the key is now the same on every build."
             echo "- The EXE is **unsigned**, so SmartScreen will warn: nothing vouches for the binary"
             echo "  beyond this repository and this build log."
             echo "- The Windows zip is **standalone**: \`/MT\` links the C++ runtime into the exe, so no"
@@ -384,10 +427,16 @@ jobs:
             echo "  used to say 8/8 and stayed at 8/8 after the ninth test was added (defect 77). They are"
             echo "  NOT a working internet-sharing product yet, and no rate quoted in this repository is an"
             echo "  internet speed."
-            echo "- This build contains the round-5 fixes (reports/RESULTS.md, defects 71-81), including the"
-            echo "  Android copy button, which in the previous build copied an empty pane (defect 71) -"
-            echo "  reported from a real phone. The copy fix is in the source and guarded by"
-            echo "  scripts/check_frontend_parity.py; it has not been tried on a phone by this build host."
+            echo "- What is in this build (round 6): the Android copy button fixed again where it was still"
+            echo "  wrong - it copied the banner and nothing else before the node starts, and the report's own"
+            echo "  lines were the wrong pane (reports/RESULTS.md defects 71, 82-88). Both apps now self-tune:"
+            echo "  if the speaker volume is below half it is raised for the session and put back on Stop, the"
+            echo "  volume and the audio route are printed in the report, and the session id and profile of"
+            echo "  THIS end are printed in the panel so the two screens can be compared line by line. The"
+            echo "  Windows recorder no longer steals samples from the link, and it says exactly which"
+            echo "  endpoints opened."
+            echo "- None of that has been tried on a phone or a PC by this build host. It is what the next"
+            echo "  field report has to decide, and the build stamps above are how we will know it did."
             echo
             echo "| file | bytes | sha256 |"
             echo "|---|---|---|"

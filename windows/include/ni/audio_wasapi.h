@@ -72,6 +72,22 @@ class WasapiEngine {
   bool capture_silent() const { return capture_silent_; }
   std::string describe() const;
 
+  // ---- Windows volume, read and (carefully) nudged ------------------------------------------------
+  //
+  // Why this is here: two field runs ended with "nothing crosses the air", and on the PC the loudest
+  // event in an eight-second recording sat 7 dB above the room. A shared-mode WASAPI stream plays at the
+  // endpoint's own volume, so a speaker volume slider at 20 % is a modem nobody can hear - and nothing in
+  // the app said what the volume was. These report it.
+  //
+  // set_render_volume_pct is called once, at open(), and only when the render volume is below 50 %, and
+  // the old value is remembered so close() puts it back: a self-tuning app must not leave a user's
+  // machine louder than it found it.
+  bool read_volumes(double* render_pct, bool* render_muted, double* capture_pct,
+                    bool* capture_muted) const;
+  bool set_render_volume_pct(double pct);
+  // The volume the user had before this engine changed it, or -1 if it never changed it.
+  double render_volume_before() const;
+
  private:
   Impl* p_ = nullptr;
   double fs_ = 0.0;

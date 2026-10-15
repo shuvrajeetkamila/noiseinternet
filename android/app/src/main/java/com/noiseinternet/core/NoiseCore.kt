@@ -121,6 +121,12 @@ class NoiseCore(config: Config) {
         val txGain: Double? = null,
         val state: String,
         val role: String,
+        // Which build of the engine produced this JSON (core/common.h NI_BUILD_STAMP) and which build this
+        // APK is (a generated string resource). Both are printed by the panel: "the fix did not work" is
+        // unanswerable while nobody can tell which build is running (round 6).
+        val build: String,
+        val appBuild: String,
+        val sessionId: Int?,
         val profile: String,
         val sampleRate: Double?,
         val peerOnline: Boolean,
@@ -172,14 +178,15 @@ class NoiseCore(config: Config) {
         val raw: String,
     ) {
         companion object {
-            fun parse(json: String): Status {
+            fun parse(json: String, appBuild: String = ""): Status {
                 val o = try {
                     JSONObject(json)
                 } catch (e: Exception) {
                     // A malformed status document is a bug worth showing, never worth hiding behind
                     // plausible zeros.
                     return Status(
-                        state = "unparsable", role = "-", profile = "-", sampleRate = null,
+                        state = "unparsable", role = "-", build = "", appBuild = appBuild, sessionId = null,
+                        profile = "-", sampleRate = null,
                         peerOnline = false, snrDb = null, rssiDbfs = null, noiseDbfs = null,
                         evecPct = null, rttMs = null, lossPct = null, usefulBpsUp = null,
                         usefulBpsDown = null, framesSent = null, framesReceived = null, selfEchoBursts = null,
@@ -206,6 +213,9 @@ class NoiseCore(config: Config) {
                 return Status(
                     state = o.optString("state_name", o.optString("state", "-")),
                     role = o.optString("role", "-"),
+                    build = o.optString("build", ""),
+                    appBuild = appBuild,
+                    sessionId = if (o.isNull("session_id")) null else o.optInt("session_id"),
                     profile = s2("profile", "profile_name"),
                     sampleRate = d("sample_rate"),
                     peerOnline = o.optBoolean("peer_online", false),

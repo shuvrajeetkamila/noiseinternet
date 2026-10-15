@@ -51,6 +51,19 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
     private lateinit var results: TextView
     private lateinit var profiles: MutableList<Pair<Int, String>>
 
+    /**
+     * Which build this APK is, written into the app's resources by the build (see
+     * android/app/build.gradle.kts). It is printed in the report, so "did my phone actually get the new
+     * build?" is answered by the app itself rather than by comparing download timestamps.
+     */
+    private val appStamp: String by lazy {
+        try {
+            getString(R.string.ni_build_stamp)
+        } catch (e: Exception) {
+            "unknown (this APK has no stamp resource)"
+        }
+    }
+
     // Exactly what renderStatus() built for the state pane this time round - the report, without the
     // copy acknowledgement that is appended to the pane itself (see copyReport/renderStatus).
     private var reportBase: String = ""
@@ -307,18 +320,30 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             null
         }
         if (o == null) {
-            reportBase = ""
+            // The pane and the copied text are the same string here. They used to diverge: reportBase stayed
+            // empty on this path, so the copy button on a phone that had never been started copied the
+            // banner and nothing else (found while fixing defect 71 - a copy button that copies part of
+            // what is on screen is the same defect one step smaller).
+            val line = "no node yet - press Start\nbuild: app " + appStamp +
+                "   (the engine's build appears here once a node is running)"
+            reportBase = line
             val note = freshCopyNote()
-            state.text = if (note.isEmpty()) "no node yet - press Start" else "no node yet - press Start\n\n" + note
+            state.text = if (note.isEmpty()) line else line + "\n\n" + note
             banner.text = "NOT TESTED: nothing has been measured by this app"
             return
         }
-        val st = NoiseCore.Status.parse(json)
+        val st = NoiseCore.Status.parse(json, appStamp)
         val svc = NoiseService.get()
         reportBase = buildString {
-            append("state ").append(st.state).append("  role ").append(st.role)
+            // Build first: the single most useful line when a fix "did not work" is knowing which build is
+            // running. Engine and app separately, because two different toolchains produce them.
+            append("build: engine ").append(st.build.ifBlank { "(none reported)" })
+            append("   app ").append(st.appBuild.ifBlank { "(unstamped)" })
+            append("\nstate ").append(st.state).append("  role ").append(st.role)
             append("  profile ").append(st.profile)
+            st.sessionId?.let { append("  session ").append(it) }
             st.sampleRate?.let { append("  fs ").append(it.toInt()) }
+            append("   <- profile, session and fs must be identical on both ends")
             // The engine's own sentence when it has one (it knows things the panel cannot see: own
             // transmissions heard back, a passphrase proof that failed). The Kotlin diagnosis is the
             // fallback for the documents the service writes itself - NO PASSPHRASE and friends - which

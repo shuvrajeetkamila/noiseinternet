@@ -50,12 +50,17 @@ else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# Which build this is, printed by the window (status JSON field "build") and by `ni audit`. CI passes
+# -DNI_BUILD_STAMP=<short sha>; a local build says so instead of pretending to be a published one.
+set(NI_BUILD_STAMP "local build (no CI stamp)" CACHE STRING "Build stamp shown by the front ends")
+
 set(NI_CORE_DIR ${CMAKE_CURRENT_LIST_DIR}/../shared/acoustic_core)
 
 file(GLOB NI_CORE_SRC ${NI_CORE_DIR}/src/*.cpp)
 list(REMOVE_ITEM NI_CORE_SRC ${NI_CORE_DIR}/src/cli.cpp)   # the CLI is built separately, see below
 
 add_library(ni_core STATIC ${NI_CORE_SRC})
+target_compile_definitions(ni_core PUBLIC NI_BUILD_STAMP="${NI_BUILD_STAMP}")
 target_include_directories(ni_core PUBLIC ${NI_CORE_DIR}/include)
 target_include_directories(ni_core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 # NI_WITH_WASAPI is what makes ni_audio_enumerate() and the pump in audio_wasapi.cpp real; without it

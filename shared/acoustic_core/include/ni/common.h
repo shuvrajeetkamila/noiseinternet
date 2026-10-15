@@ -16,6 +16,17 @@
 // fed, which is the whole point of a shared core.
 #define NI_PI 3.14159265358979323846
 
+// Which build of the engine is running, stamped in by the build system (CMake -DNI_BUILD_STAMP=...).
+//
+// This exists because a user reported "the fix did not work" and neither of us could tell whether the app
+// on the phone was the new one: successive CI builds produced APKs that could not be installed over each
+// other (a fresh debug key every run - see android/app/build.gradle.kts) and nothing on the screen said
+// which build it was. Every front end now prints this string, the app prints its own stamp next to it, and
+// a mismatch is visible at a glance instead of being guessed at.
+#ifndef NI_BUILD_STAMP
+#define NI_BUILD_STAMP "local build (unstamped)"
+#endif
+
 #if defined(_WIN32)
 #define NI_STRCASECMP _stricmp
 #else
