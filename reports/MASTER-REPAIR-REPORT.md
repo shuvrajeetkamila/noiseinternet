@@ -275,3 +275,106 @@ five separate defects that all looked like one symptom — now completes byte-id
 publish a window whose controls overlap (defects 27 and the UI items). What has *not* changed: no message
 has ever crossed real air, and Gate F stays NOT TESTED until the user runs the Part F procedure on real
 hardware.
+
+---
+
+# Round 5 — the APK copy button, and the ten defects the 17:11 field log exposed
+
+**Asked for:** "rebuild the APK and the EXE [COPY BUTTON ON APK DOES NOT WORK, SO MAKE IT FUNCTIONABLE TO
+COPY THE REPORT]". The copy button is the headline; the field log that came with it (Windows giver +
+Android phone giver, session 12, profile 10) was read line by line and produced ten more defects, all fixed
+in the same build.
+
+## 1. Root cause of the reported defect (71)
+
+`MainActivity.kt` bound `copy_report` to **`results`** — the lower pane, which is empty at rest — while the
+report the user reads is assembled by `renderStatus()` into **`state`** (and `banner`) every 500 ms.
+So the button copied an empty string and answered "nothing to copy yet", and the "[copied N characters]"
+line it wrote into `results` was overwritten by the next refresh before it could be read.
+
+Fixed: `copyReport()` re-renders, copies banner + report + results in reading order, keeps the
+acknowledgement re-drawn through the refresh for 15 s, toasts, and reports a clipboard refusal instead of
+claiming success. `scripts/check_frontend_parity.py` now fails the build if the handler stops reading the
+report pane or stops reaching the clipboard.
+
+## 2. The other ten (72–81)
+
+See the table at the end of `reports/RESULTS.md`. In one line each: the 8-second recorder kept 2.25 s and
+starved the link (72), a failed WAV write said nothing useful (73), Android printed a Windows-only sentence
+(74), the two ends contradicted each other about the tunnel (75), `-120 dBFS`/`100 % loss` placeholders were
+printed as readings (76), the window claimed "8/8 unit tests" forever (77), "self-echo 128" was one burst
+(78), the audio line never named the devices (79), "475 underruns"/"12 failed reads" had no denominator (80),
+and a **giver** was refused over a proxy token it never uses (81).
+
+## 3. Files changed
+
+`git diff --stat 5d7f31c..HEAD` — 14 files, +564/−108:
+
+```
+ .github/workflows/build.yml                        |  10 +-
+ android/app/src/main/java/com/noiseinternet/app/MainActivity.kt      | 126 ++++++++---
+ android/app/src/main/java/com/noiseinternet/core/AudioEngine.kt      |  43 +++-
+ android/app/src/main/java/com/noiseinternet/core/NoiseCore.kt        |  23 ++-
+ reports/RESULTS.md                                 |  43 +++-
+ scripts/check_frontend_parity.py                   |  34 +++
+ shared/acoustic_core/include/ni/node.h             |  30 +++
+ shared/acoustic_core/include/ni/session.h          |  15 ++
+ shared/acoustic_core/src/node.cpp                  |  72 +++++++-
+ shared/acoustic_core/src/session.cpp               |  26 ++-
+ shared/acoustic_core/src/wav.cpp                   |  10 +-
+ shared/acoustic_core/tests/t_self_echo.cpp         |  44 ++--
+ windows/src/NoiseInternet/audio_wasapi.cpp         |  19 ++-
+ windows/src/NoiseInternet/gui_main.cpp             | 177 +++++++++++++-----
+```
+
+The two new core capabilities that made the fixes possible: `Node::rx_tap_begin()/rx_tap_end()` (record what
+the engine received, without a second reader on the microphone) and `phy_measured`/`arq_measured` in the
+status JSON (so a UI can print "not measured yet" instead of a default value).
+
+## 4. Tests run, and what they returned
+
+| what | result |
+|---|---|
+| `ctest` on Linux (11 tests, includes the two-way acoustic link test) | **11/11 pass**, 1.1 s |
+| `t_self_echo` (own burst looped back, plus the same burst decoded twice) | 15 checks pass |
+| two-way link test, `ni linktest --profile 2/11 --snr 35 --bytes 30` | `directions_verified: 2` on both profiles, fresh random payload each run (sha256 printed on both ends); profile 10 @ 26 dB still 0 — the marginal-channel case |
+| `scripts/check_frontend_parity.py` | **PASS**, 16 checks (5 of them new: copy handler, log copy, session-id default, measured flags) |
+| `scripts/syntax_check.sh` | 21/21 core sources compile |
+| MSVC job (CI) | window builds, **10/10 tests pass**, `--ui-check` exits 0, **32 controls** enumerated |
+| Android job (CI) | `assembleDebug` succeeds; APK contains `lib/arm64-v8a/libnoiseinternet_jni.so` |
+| `ni demo` | payload digests unchanged (`2ed3e269…`); new keys `phy_measured`, `arq_measured`, `self_echo_repeats` present |
+
+## 5. Deliverables, labelled
+
+| deliverable | label | why |
+|---|---|---|
+| `noiseinternet-debug.apk` (this build) | **PARTIAL** | compiles, contains the copy fix; debug-signed; **not installed on a phone by this host** |
+| `NoiseInternet.exe` + zip (this build) | **PARTIAL** | compiles on MSVC, 10/10 tests, `--ui-check` OK; unsigned; never run on Windows by this host |
+| copy button, Android | **PARTIAL** | defect found and fixed; guarded by the parity check; needs one field report to be called PASS |
+| copy buttons, Windows (status/log) | **PARTIAL** | present and enumerated by `--ui-check`; not clicked by a human here |
+| record 8 s and analyse | **PARTIAL** | now records through the engine (no second reader); needs one run on a machine with a microphone |
+| two-way acoustic link test | **PASS (software)** | `directions_verified: 2`, both directions SHA-256 verified, now a ctest |
+| two-way link over **air** | **NOT TESTED** | no sound card, no microphone, no room |
+| proxy leg (UDP+DNS) | **PARTIAL** | socket-level tests pass; audio-tunnel arithmetic not exercised |
+| VPN (`VpnService`) leg | **NOT TESTED** | needs a phone |
+| internet verification | **NOT TESTED** | needs a working acoustic link first |
+
+Gates A–H keep the labels they had at `5d7f31c` (A PASS, B PARTIAL, C PARTIAL, D PASS, E PARTIAL,
+F NOT TESTED, G PARTIAL, H PARTIAL): this round fixed defects *on top of* those gates and did not move the
+one that matters — no sound has crossed a room. Defect 75 does move a claim *down*: the engine no longer
+says "tunnel up" for a proxy nobody is using.
+
+## 6. Next unresolved blocker
+
+The same one, one measurement away from an answer: **the Windows machine's own speaker-to-microphone path**
+has never produced a decodable burst (mic hears −43.9 dBFS "loudest" against a −50.6 dBFS room, 43–53 % band
+errors — a signal that is not the modem's). The next single action is on the PC, with this build:
+
+1. Start → **GIVER**, profile `10 FD-LOW-DBPSK`, session `7`, passphrase typed on both ends.
+2. Press **Record 8 s and analyse** and send back the two lines it now prints: `kept N of 384000 samples …`
+   and `saved as <full path>` (or `NOT SAVED - … <the platform's own error>`).
+3. `ui-check.txt` from the zip, which lists the audio endpoints the exe opened.
+
+That answer decides the next move: if the recording now holds a burst and reports `DECODES this recording`,
+the PC path works and the problem is the room/gain; if it says the microphone delivered nothing, the capture
+endpoint is the blocker and the audio line will name it.
