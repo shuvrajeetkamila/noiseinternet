@@ -138,12 +138,25 @@ class NoiseCore(config: Config) {
         // microphone (defect 59). Shown separately, because a lone phone reporting "decoded 48" with
         // "bytes received 0" was really this number all along.
         val selfEchoBursts: Long?,
+        // Repeat decodes of the same own burst (defect H): "self-echo 128" was one transmitted frame that
+        // the decoder found again in audio it still held. Kept apart from the count above so the panel can
+        // say which of the two happened.
+        val selfEchoRepeats: Long?,
         val retries: Long?,
         val crcFail: Long?,
         val bytesSent: Long?,
         val bytesReceived: Long?,
         val mtu: Int?,
+        // Did the engine actually measure what those numbers claim to measure? False means the fields
+        // hold the engine's default values (-120 dBFS, 0.00 %, 100.00 % loss) and the panel must say
+        // "not measured yet" rather than print them as readings (defect F).
+        val phyMeasured: Boolean,
+        val arqMeasured: Boolean,
         val tunnelUp: Boolean,
+        // The engine's own description of its proxy/relay state ("streams=0", "[DISABLED by rate
+        // limit]", and so on) - the words that keep the engine's tunnel line and this phone's
+        // VpnService line from reading as a contradiction (defect E).
+        val tunnelDetail: String,
         val internetOk: Boolean,
         val audioNote: String,
         // Diagnosis: the newest microphone block's level, how many bursts had a sync but could not be
@@ -170,8 +183,10 @@ class NoiseCore(config: Config) {
                         peerOnline = false, snrDb = null, rssiDbfs = null, noiseDbfs = null,
                         evecPct = null, rttMs = null, lossPct = null, usefulBpsUp = null,
                         usefulBpsDown = null, framesSent = null, framesReceived = null, selfEchoBursts = null,
+                        selfEchoRepeats = null,
                         retries = null, crcFail = null, bytesSent = null, bytesReceived = null,
-                        mtu = null, tunnelUp = false, internetOk = false,
+                        mtu = null, phyMeasured = false, arqMeasured = false, tunnelUp = false,
+                        tunnelDetail = "", internetOk = false,
                         audioNote = "status JSON could not be parsed: ${e.message}", inDbfs = null,
                         syncHits = null, rxNoFrame = null, pairingNote = "", pairing = "unknown",
                         sas = "", advice = "", txGain = null, raw = json,
@@ -205,12 +220,18 @@ class NoiseCore(config: Config) {
                     framesSent = l("frames_sent"),
                     framesReceived = l("frames_received"),
                     selfEchoBursts = l("self_echo_bursts"),
+                    selfEchoRepeats = l("self_echo_repeats"),
                     retries = l("retransmits") ?: l("retries"),
                     crcFail = l("crc_fail"),
                     bytesSent = l("bytes_sent"),
                     bytesReceived = l("bytes_received"),
                     mtu = if (o.isNull("mtu")) null else o.optInt("mtu"),
+                    // Absent means "not measured" on purpose: an older core that does not send the flags
+                    // still gets the cautious wording, never a default printed as a reading.
+                    phyMeasured = o.optBoolean("phy_measured", false),
+                    arqMeasured = o.optBoolean("arq_measured", false),
                     tunnelUp = o.optBoolean("tunnel_up", false),
+                    tunnelDetail = o.optString("tunnel_detail", ""),
                     internetOk = o.optBoolean("internet_ok", false),
                     audioNote = o.optString("audio_note", ""),
                     inDbfs = d("in_dbfs"),

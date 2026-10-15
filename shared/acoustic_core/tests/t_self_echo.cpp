@@ -23,28 +23,6 @@ using namespace ni;
 
 namespace {
 
-// A PDU built by the same codec the link uses, so the loopback is a real burst and not a stub.
-std::vector<uint8_t> make_pdu(uint16_t session_id, uint64_t seq) {
-  Frame f;
-  memset(&f, 0, sizeof f);
-  f.version = NI_PROTO_VERSION;
-  f.type = NI_FT_PING;
-  f.flags = 0;
-  f.session_id = session_id;
-  f.seq = seq;
-  const char* body = "SELF-ECHO TEST";
-  f.payload = (const uint8_t*)body;
-  f.payload_len = (uint16_t)strlen(body);
-  uint8_t body_buf[NI_MAX_BURST_PDU];
-  int hn = ni_frame_encode(body_buf, sizeof body_buf, f);
-  if (hn <= 0) return {};
-  // the same 2-byte length prefix the ARQ puts in front of a burst PDU
-  std::vector<uint8_t> out((size_t)hn + 2);
-  ni_wr16(&out[0], (uint16_t)hn);
-  memcpy(&out[2], body_buf, (size_t)hn);
-  return out;
-}
-
 }  // namespace
 
 int main() {
@@ -90,6 +68,28 @@ int main() {
                  "hearing yourself must not advance the link to FRAME_OK");
     NT_CHECK_MSG(link.diagnostics_json().find("\"self_echo_bursts\"") != std::string::npos,
                  "the self-echo count must reach the status JSON both UIs read");
+
+    // The same audio decoded a second time (defect H). The 2026-10-15 field log showed "self-echo 128"
+    // from a single transmitted frame: one physical echo, seen 128 times, because the decoder is fed
+    // overlapping windows and finds the burst again on the next pass. Counting each look as another echo
+    // is what made a one-burst finding look like a hundred. Here the same samples are played through the
+    // receive path a second time on the same clock, so the duplicate decodes are certain rather than
+    // dependent on room reflections: the distinct-echo count must not grow by more than a burst or two,
+    // and the repeats must be counted as repeats.
+    const uint64_t echoes_after_first_pass = c.self_echo;
+    for (size_t off = 0, k = 0; off < wave.size(); off += 480, ++k) {
+      size_t n = wave.size() - off < 480 ? wave.size() - off : 480;
+      link.feed_pcm(&wave[off], n);
+      link.tick(8000 + (int64_t)(k * 10));
+    }
+    NT_CHECK_MSG(link.counters().self_echo_repeats >= 1,
+                 "the same burst decoded again was not counted as a repeat (self_echo=" +
+                     std::to_string(link.counters().self_echo) + ", repeats=" +
+                     std::to_string(link.counters().self_echo_repeats) + ")");
+    NT_CHECK_MSG(link.counters().self_echo <= echoes_after_first_pass + 2,
+                 "repeat decodes were counted as new echoes: " +
+                     std::to_string(echoes_after_first_pass) + " -> " +
+                     std::to_string(link.counters().self_echo));
     link.stop();
   }
 

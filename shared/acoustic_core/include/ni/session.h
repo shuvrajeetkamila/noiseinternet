@@ -333,6 +333,11 @@ class AcousticLink {
     // they used to be counted as received frames: the phone reported "decoded 48" with "bytes received
     // 0" because 48 of the 48 were the device hearing itself. (Defect 59.)
     uint64_t self_echo = 0;
+    // The same own burst decoded again, usually because the capture ring still holds the audio and the
+    // decoder finds it a second time on the next pass. Counted apart from self_echo so that number
+    // answers "how many of my own bursts came back" (one) instead of "how many times did the decoder
+    // look at it" (128 in the 2026-10-15 field log, from a single transmitted frame). (Defect H.)
+    uint64_t self_echo_repeats = 0;
   };
   // The last few burst PDUs this device put on the air, newest last. An echo of our own transmission
   // decodes to the bytes we sent, so an incoming PDU that matches one of these (within
@@ -402,6 +407,16 @@ class AcousticLink {
   int64_t listen_until_ms_ = 0, last_tx_end_ms_ = 0, peer_seen_ms_ = 0, last_peer_burst_ms_ = 0;
   TxEcho tx_echo_[kTxEchoRing];
   int tx_echo_next_ = 0;
+  // Deduplication for the echo counter: which own bursts have already been counted as heard back, over
+  // the same window in which an echo is recognised at all. This is almost always the same burst decoded
+  // again - the decoder is fed overlapping capture windows and finds it a second and third time - but it
+  // is also what a retransmission of the same frame looks like coming back, and both are one frame of
+  // ours being heard, not several. A distinct frame has a distinct hash, so this cannot merge two real
+  // echoes into one. (Defect H: "self-echo 128" was one transmitted frame.)
+  static const int kEchoCountRing = 64;
+  struct EchoCount { uint64_t hash = 0; int64_t ms = 0; };
+  EchoCount echo_count_[kEchoCountRing];
+  int echo_count_next_ = 0;
   int pending_profile_ = -1;            // requested, waiting for the peer's ack (see apply_profile)
   int64_t pending_profile_ms_ = 0;
   int64_t tx_backlog_ = 0;  // samples the transport still owes the speaker (set_tx_backlog)

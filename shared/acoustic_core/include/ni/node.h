@@ -4,6 +4,7 @@
 #ifndef NI_NODE_H
 #define NI_NODE_H
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "ni/aec.h"
@@ -96,7 +97,17 @@ struct StatusSnapshot {
   // heard. They also no longer make the peer look online, because the link drops them before the ARQ
   // can see them.
   uint64_t self_echo_bursts = 0;
+  // Repeat decodes of the same own burst (see Counters::self_echo_repeats). Shown next to the echo
+  // count so that "128" can be understood as "the decoder looked at the same burst 128 times".
+  uint64_t self_echo_repeats = 0;
   uint64_t retries = 0, crc_fail = 0, malformed = 0;
+  // Did the numbers above actually get measured? -120 dBFS and 0 % are the struct's default values, and
+  // both front ends used to print them as if they were readings: a panel showing "rssi -120.0 dBFS
+  // noise -120.0 dBFS EVM 0.00 % loss 100.00 %" on a link where no burst had ever been demodulated said
+  // "your microphone is dead and everything is lost" when the truth was "nothing has been received yet"
+  // (defect F). False means "not measured yet" and both front ends print exactly that instead.
+  bool phy_measured = false;    // a burst was demodulated: SNR/RSSI/noise/EVM are real readings
+  bool arq_measured = false;    // a frame was transmitted: loss/RTT/throughput mean something
   bool tunnel_up = false, internet_ok = false;
   std::string tunnel_detail, internet_detail;
   int mtu = 0;
@@ -132,6 +143,16 @@ class Node {
   // PCM plumbing
   int feed_capture(const float* x, size_t n);  // microphone samples in
   int pull_playback(float* out, size_t cap);    // speaker samples out
+
+  // Record exactly what the engine received from the microphone, without racing the audio pump for it.
+  // The Windows GUI's "Record 8 s and analyse" button used to call the same blocking capture function
+  // from its own thread while the pump thread was already reading the same endpoint, so the two split
+  // the stream between them: 8 seconds of wall clock produced 2.25 s and 3.4 s of samples in the two
+  // field runs (defect C). Recording through the engine gives every sample the engine saw - which is
+  // the honest thing to analyse anyway, because it is what the modem had to work with.
+  void rx_tap_begin();
+  // Stops the tap and moves the captured samples out (frames, mono, cfg_.fs).
+  std::vector<float> rx_tap_end();
   bool playback_ready() const { return link_ ? link_->tx_ready() : false; }
 
   // Advance all state machines. now_ms is this device's monotonic clock.
@@ -238,6 +259,15 @@ class Node {
   bool peer_netinfo_valid_ = false;
   int64_t peer_netinfo_ms_ = 0;
   PhyStats last_phy_{};
+  // Guards last_phy_/phy_measured_: the stats callback runs on whichever thread called feed_capture
+  // (the audio pump), the snapshot is read from the UI thread. A PhyStats is a dozen doubles, so the
+  // lock costs nothing next to the demodulation that produced it.
+  mutable std::mutex phy_mu_;
+  bool phy_measured_ = false;
+  // The receive tap (see rx_tap_begin). Its own mutex, held for the length of one append.
+  mutable std::mutex rx_tap_mu_;
+  std::vector<float> rx_tap_;
+  bool rx_tap_on_ = false;
   std::string last_verify_;
   // assist bookkeeping: the output level in use and when to move to the next rung
   double tx_gain_ = 0.85;

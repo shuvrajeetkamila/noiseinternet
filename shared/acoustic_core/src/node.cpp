@@ -41,6 +41,16 @@ int Node::ensure_built() {
   o.arq.max_retries = cfg_.max_retransmit;
   o.arq.session_id = cfg_.session_id;
   link_.reset(new AcousticLink(o));
+  // The per-burst PHY statistics (RSSI, noise floor, EVM) have to be kept somewhere, and until now they
+  // were not kept at all: `last_phy_` was declared, read by snapshot() and never written, so the status
+  // panel printed the struct's defaults - rssi -120 dBFS, noise -120 dBFS, EVM 0.00 % - as if they were
+  // readings, on every run, on both platforms (defect F). The link already offers the callback; this
+  // keeps the newest one and records that a burst was actually demodulated.
+  link_->on_stats_ = [this](const PhyStats& st) {
+    std::lock_guard<std::mutex> g(phy_mu_);
+    last_phy_ = st;
+    if (st.bins_used > 0 || st.rssi_dbfs > -119.0) phy_measured_ = true;
+  };
   if (cfg_.sim_channel) chan_.reset(new AcousticChannel(cfg_.ch));
   std::vector<AudioDeviceInfo> dev;
   std::string why;
@@ -174,8 +184,32 @@ int Node::set_profile(int pid) {
 }
 
 int Node::feed_capture(const float* x, size_t n) {
+  // A null buffer is a caller bug; a zero-length one is not - "this callback captured nothing" is normal,
+  // is what the FFI boundary documents as NI_OK, and t_abi checks it (the tap below must not change that).
+  if (!x) return NI_ERR_PARAM;
+  if (!n) return NI_OK;
+  {
+    // The tap, before the link sees anything: this is exactly what the microphone delivered to the
+    // engine, which is what the GUI's recorder analyses and saves (see rx_tap_begin).
+    std::lock_guard<std::mutex> g(rx_tap_mu_);
+    if (rx_tap_on_) rx_tap_.insert(rx_tap_.end(), x, x + n);
+  }
   if (!link_) return NI_ERR_STATE;
   return link_->feed_pcm(x, n);
+}
+
+void Node::rx_tap_begin() {
+  std::lock_guard<std::mutex> g(rx_tap_mu_);
+  rx_tap_.clear();
+  rx_tap_on_ = true;
+}
+
+std::vector<float> Node::rx_tap_end() {
+  std::lock_guard<std::mutex> g(rx_tap_mu_);
+  rx_tap_on_ = false;
+  std::vector<float> out;
+  out.swap(rx_tap_);
+  return out;
 }
 
 // Pull the samples this device must play. With sim_channel enabled the raw burst is run
@@ -620,7 +654,13 @@ static std::string status_advice(const StatusSnapshot& s) {
   // fires on evidence, and frames_received no longer contains echoes (defect 59).
   if (s.self_echo_bursts > 0 && !s.peer_online) {
     o << "the microphone decoded " << s.self_echo_bursts
-      << " burst(s) that were this device's OWN transmission coming back (self-echo), and no burst " \
+      << " burst(s) that were this device's OWN transmission coming back (self-echo";
+    // "128 decodes of 1 burst" and "128 bursts heard back" are different findings, and the panel used to
+    // print the first as if it were the second (defect H).
+    if (s.self_echo_repeats)
+      o << ", plus " << s.self_echo_repeats
+        << " repeat decodes of the same burst - the decoder finding it again in the audio it still holds";
+    o << "), and no burst " \
          "from any other device. Speaker, microphone, profile and modem all work on THIS end - the " \
          "proof is that it hears itself clearly enough to decode itself. What has not happened is the " \
          "other device being heard at all: check that it is started, that it is transmitting (a " \
@@ -720,21 +760,31 @@ StatusSnapshot Node::snapshot() const {
     s.frames_sent = a.tx_frames;
     s.frames_received = a.rx_frames;
     s.self_echo_bursts = link_->counters().self_echo;
+    s.self_echo_repeats = link_->counters().self_echo_repeats;
     s.bytes_sent = a.tx_bytes_payload;
     s.bytes_received = a.rx_bytes_payload;
     s.retries = a.tx_retries;
     s.crc_fail = a.rx_crc_fail + a.rx_malformed;
     s.rtt_ms = a.rtt_ms_avg;
     s.loss_pct = 100.0 * (double)a.lost_frames / (double)std::max<uint64_t>(1, a.tx_frames);
+    // Nothing has been transmitted, so "loss 100.00 %" is not a measurement of anything: it is what
+    // 0 lost of max(1,0) transmits prints. The panel says "not measured yet" instead (defect F).
+    s.arq_measured = a.tx_frames > 0;
     s.useful_bps_down = a.throughput_down_bps;
     s.useful_bps_up = a.throughput_up_bps;
     s.session_ms = a.last_rx_ms ? a.last_rx_ms - a.session_start_ms : 0;
     s.erle_db = link_->erle_db();
     s.snr_db = link_->estimator().band_snr_db();
     auto& l = *link_;
-    s.rssi_dbfs = last_phy_.rssi_dbfs;
-    s.noise_dbfs = last_phy_.noise_dbfs;
-    s.evec_pct = last_phy_.evec;
+    {
+      // Under the same lock the stats callback takes: PHY numbers are written on the audio thread and
+      // read here from the UI thread (see phy_mu_ in node.h).
+      std::lock_guard<std::mutex> g(phy_mu_);
+      s.rssi_dbfs = last_phy_.rssi_dbfs;
+      s.noise_dbfs = last_phy_.noise_dbfs;
+      s.evec_pct = last_phy_.evec;
+      s.phy_measured = phy_measured_;
+    }
     (void)l;
   }
   // link bitrate: derived from the plan of a full-size frame, never from the symbol rate alone
@@ -748,7 +798,14 @@ StatusSnapshot Node::snapshot() const {
       s.link_bps = p.payload_bitrate;
     }
   }
-  s.tunnel_up = rproxy_ != nullptr && rproxy_->streams_open() >= 0 && running_;
+  // "tunnel up" has to mean a tunnel that is carrying something, not a proxy object that exists.
+  // streams_open() counts the sockets currently using the receiver gateway and is never negative, so the
+  // old test (>= 0) was true whenever a proxy object had been built and the node was running - which is
+  // how one end printed "tunnel up" while the other end of the same link printed "tunnel not requested"
+  // (defect E). A tunnel now requires the link to be paired and at least one client to actually be using
+  // the proxy; tunnel_detail still says what the proxy is listening for either way.
+  const bool paired_now = link_ && link_->pairing() && link_->pairing()->state_name() == std::string("paired");
+  s.tunnel_up = rproxy_ != nullptr && running_ && paired_now && rproxy_->streams_open() > 0;
   if (link_ && link_->pairing()) {
     s.pairing = link_->pairing()->state_name();
     s.sas = link_->pairing()->sas();
@@ -794,7 +851,12 @@ std::string StatusSnapshot::to_json() const {
     << ", \"bytes_sent\": " << bytes_sent << ", \"bytes_received\": " << bytes_received
     << ", \"frames_sent\": " << frames_sent << ", \"frames_received\": " << frames_received
     << ", \"self_echo_bursts\": " << self_echo_bursts
+    << ", \"self_echo_repeats\": " << self_echo_repeats
     << ", \"retransmits\": " << retries << ", \"crc_fail\": " << crc_fail << ", \"mtu\": " << mtu
+    // Both front ends read these to decide whether to print a number or the words "not measured yet"
+    // (defect F). They are part of the status contract now, not an extra.
+    << ", \"phy_measured\": " << (phy_measured ? "true" : "false")
+    << ", \"arq_measured\": " << (arq_measured ? "true" : "false")
     << ", \"tunnel_up\": " << (tunnel_up ? "true" : "false") << ", \"tunnel_detail\": \"" << tunnel_detail
     << "\", \"internet_ok\": " << (internet_ok ? "true" : "false") << ", \"internet_detail\": \""
     << internet_detail << "\", \"tx_gain\": " << tx_gain

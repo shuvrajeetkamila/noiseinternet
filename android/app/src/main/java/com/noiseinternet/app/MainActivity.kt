@@ -51,6 +51,20 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
     private lateinit var results: TextView
     private lateinit var profiles: MutableList<Pair<Int, String>>
 
+    // Exactly what renderStatus() built for the state pane this time round - the report, without the
+    // copy acknowledgement that is appended to the pane itself (see copyReport/renderStatus).
+    private var reportBase: String = ""
+    // The most recent "copied N characters" line and when it was made. It is re-drawn on every 500 ms
+    // refresh for a few seconds, because the pane it is written into is rewritten by that same loop and
+    // the acknowledgement the old handler wrote was gone before anyone could read it (defect 71).
+    private var copiedNote: String = ""
+    private var copiedAt: Long = 0L
+
+    private companion object {
+        const val ACK_PREFIX = "COPIED:"
+        const val COPY_ACK_MS = 15000L
+    }
+
     private val refresh = object : Runnable {
         override fun run() {
             renderStatus()
@@ -123,17 +137,7 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
         findViewById<Button>(R.id.refresh).setOnClickListener { renderStatus() }
         // Copy the report. The panes here are the only place the measurements exist, and a user with a
         // phone cannot select-and-copy a TextView reliably; the button copies exactly what is shown.
-        findViewById<Button>(R.id.copy_report).setOnClickListener {
-            val text = results.text?.toString().orEmpty()
-            if (text.isBlank()) {
-                results.text = "nothing to copy yet - run a test or press Refresh first."
-            } else {
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("Noise Internet report", text))
-                // Say it in the pane itself: a toast disappears before some people finish reading it.
-                results.text = text + "\n\n[copied " + text.length + " characters to the clipboard]"
-            }
-        }
+        findViewById<Button>(R.id.copy_report).setOnClickListener { copyReport() }
 
         askAudioPermission()
         window.decorView.post(refresh)
@@ -303,13 +307,15 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             null
         }
         if (o == null) {
-            state.text = "no node yet - press Start"
+            reportBase = ""
+            val note = freshCopyNote()
+            state.text = if (note.isEmpty()) "no node yet - press Start" else "no node yet - press Start\n\n" + note
             banner.text = "NOT TESTED: nothing has been measured by this app"
             return
         }
         val st = NoiseCore.Status.parse(json)
         val svc = NoiseService.get()
-        state.text = buildString {
+        reportBase = buildString {
             append("state ").append(st.state).append("  role ").append(st.role)
             append("  profile ").append(st.profile)
             st.sampleRate?.let { append("  fs ").append(it.toInt()) }
@@ -333,14 +339,30 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             // like a peer that answers and delivers nothing; with it, it reads like a device listening to
             // itself, which is what it is (defect 59).
             append("  self-echo ").append(st.n(st.selfEchoBursts))
+            val reps = st.selfEchoRepeats ?: 0L
+            if (reps > 0) append(" (+").append(reps).append(" repeat decodes of the same burst)")
             st.txGain?.let { append("\nout level ").append(String.format("%.2f", it)).append(" of full scale") }
             append("  mtu ").append(st.n(st.mtu))
-            append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")
-            append("  RSSI ").append(st.f(st.rssiDbfs)).append(" dBFS")
-            append("  noise ").append(st.f(st.noiseDbfs)).append(" dBFS")
-            append("  EVM ").append(st.f(st.evecPct, "%.2f")).append(" %")
-            append("\nRTT ").append(st.f(st.rttMs)).append(" ms")
-            append("  loss ").append(st.f(st.lossPct, "%.2f")).append(" %")
+            // "not measured yet" instead of the engine's default values (-120 dBFS, 0.00 %, 100.00 %
+            // loss). Printing those as readings made a link on which no burst had been demodulated look
+            // like a link with a dead microphone and total packet loss (defect F); the flags travel with
+            // the status JSON for exactly this.
+            if (st.phyMeasured) {
+                append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")
+                append("  RSSI ").append(st.f(st.rssiDbfs)).append(" dBFS")
+                append("  noise ").append(st.f(st.noiseDbfs)).append(" dBFS")
+                append("  EVM ").append(st.f(st.evecPct, "%.2f")).append(" %")
+            } else {
+                append("\nSNR / RSSI / noise / EVM: not measured yet - no burst has been demodulated on " +
+                    "this device, so these would be the engine's default values and not readings")
+            }
+            if (st.arqMeasured) {
+                append("\nRTT ").append(st.f(st.rttMs)).append(" ms")
+                append("  loss ").append(st.f(st.lossPct, "%.2f")).append(" %")
+            } else {
+                append("\nRTT / loss: not measured yet - nothing has been transmitted yet, so there is " +
+                    "nothing whose round trip or loss could be reported")
+            }
             append("  useful up ").append(st.n(st.usefulBpsUp)).append(" b/s")
             append("  down ").append(st.n(st.usefulBpsDown)).append(" b/s")
             append("\nframes sent ").append(st.n(st.framesSent))
@@ -349,19 +371,79 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("  crc-fail ").append(st.n(st.crcFail))
             append("\nbytes sent ").append(st.n(st.bytesSent))
             append("  received ").append(st.n(st.bytesReceived))
-            append("\ntunnel ").append(if (st.tunnelUp) "up" else "down")
-            append("  internet ").append(if (st.internetOk) "verified" else "not verified")
+            // Two different things used to share the word "tunnel" and contradict each other on screen:
+            // the engine's own proxy/relay state (from the status JSON) and this phone's Android
+            // VpnService state (from the service). They are named for what they are now, and the engine's
+            // tunnel_up is true only when the link is paired and a client is really using the proxy
+            // (defect E).
+            append("\nacoustic relay (engine): ").append(if (st.tunnelUp) "up" else "down")
+            append(if (st.tunnelDetail.isNotEmpty()) "  " + st.tunnelDetail else "")
+            append("\ninternet: ").append(if (st.internetOk) "verified by the engine's own check" else "not verified")
             if (svc != null) {
                 append("\naudio: ").append(svc.audioDescription())
-                append("\ntunnel note: ").append(svc.tunnelNote)
+                append("\nphone VPN (VpnService): ").append(svc.tunnelNote)
             }
         }
+        // The pane carries the report plus the copy acknowledgement, if one is recent. The acknowledgement
+        // is re-added here on every refresh instead of being written once into a pane this 500 ms loop
+        // rewrites (defect 71).
+        val note = freshCopyNote()
+        state.text = if (note.isEmpty()) reportBase else reportBase + "\n\n" + note
         val warn = st.audioNote.ifBlank { null } ?: svc?.routeWarning()
         banner.text = when {
             warn != null -> "NOT TESTED / WARNING: $warn"
             st.internetOk -> "internet path verified by the engine's own check"
             else -> "link up; no internet verification has succeeded"
         }
+    }
+
+    /** The copy acknowledgement while it is fresh, or "" - see copyReport and renderStatus. */
+    private fun freshCopyNote(): String =
+        if (copiedNote.isNotEmpty() && System.currentTimeMillis() - copiedAt < COPY_ACK_MS) copiedNote else ""
+
+    /**
+     * Put the report that is on screen on the clipboard.
+     *
+     * This used to copy [results] - the lower pane, which holds the answer to whatever test was last
+     * run and is empty at rest - while the report a reader is actually looking at is built into [state]
+     * and [banner]. Pressing the button therefore copied nothing and answered "nothing to copy yet",
+     * and the acknowledgement it wrote into [results] was overwritten by the 500 ms refresh loop before
+     * it could be read (defect 71, reported from the field on the APK).
+     *
+     * What it does now: re-renders first, so the panes hold this instant's snapshot rather than one up
+     * to half a second old; copies every non-empty pane in reading order; and reports the result in the
+     * state line - where renderStatus() re-adds it on every refresh for [COPY_ACK_MS], so the loop
+     * cannot erase it - as well as in a toast (Android 13+ draws its own clipboard chip, which says
+     * something was copied but not what or how much).
+     */
+    private fun copyReport() {
+        renderStatus()
+        val parts = ArrayList<String>(3)
+        for (t in listOf(banner.text, reportBase, results.text)) {
+            val s = t?.toString().orEmpty().trim()
+            if (s.isNotEmpty() && !s.startsWith(ACK_PREFIX)) parts.add(s)
+        }
+        val body = parts.joinToString("\n\n")
+        if (body.isBlank()) {
+            results.text = "there is nothing on screen to copy yet: press Start and then this button " +
+                "again. The button copies what this screen is showing, so an empty screen copies nothing."
+            return
+        }
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("Noise Internet report", body))
+        } catch (e: Exception) {
+            results.text = "this phone's clipboard refused the copy (${e.javaClass.simpleName}: " +
+                "${e.message}). The report is in the pane above and can be selected by hand."
+            return
+        }
+        val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+            .format(java.util.Date())
+        copiedNote = ACK_PREFIX + " copied " + body.length + " characters to this phone's clipboard at " +
+            stamp + " and left them there. Paste into a message or a note to send the report on."
+        copiedAt = System.currentTimeMillis()
+        renderStatus()
+        android.widget.Toast.makeText(this, "Report copied ($stamp)", android.widget.Toast.LENGTH_SHORT).show()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

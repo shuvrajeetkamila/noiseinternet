@@ -76,10 +76,23 @@ class AudioEngine(
     private var capEncoding = AudioFormat.ENCODING_PCM_FLOAT
     @Volatile
     private var capReadFailures = 0
+    // Every read attempt, so a failure count can be printed as a rate instead of a bare number. "failed
+    // reads 12" says nothing; "12 of 2401" says the capture path is fine (defect J).
+    @Volatile
+    private var capReads = 0
     @Volatile
     private var capRebuilds = 0
     @Volatile
     private var capFrames = 0
+    // Playback writes that went short, out of all writes, for the same reason.
+    @Volatile
+    private var outWrites = 0
+    // The buffer sizes actually granted, in frames: reported so a small buffer (the cause of underruns on
+    // a phone that is busy) is visible rather than inferred.
+    @Volatile
+    private var outBufFrames = 0
+    @Volatile
+    private var inBufFrames = 0
 
     // Set by the capture thread: `capOpen` once a recorder is really recording, `capDead` once every
     // source/encoding combination on the device has been refused. start() waits briefly on these so a
@@ -149,7 +162,13 @@ class AudioEngine(
                 "(minIn=$minIn minOut=$minOut)"
             return false
         }
+        // Two different sizes, and conflating them was the underrun bug: `frames` is how much the engine
+        // is asked for at a time (20 ms is right for turn-taking - the link is timed against played sound),
+        // while the AudioTrack needs a buffer several times that, because this thread also spends time
+        // running the engine and the platform's mixer drains the buffer meanwhile. One 20 ms buffer meant
+        // any hiccup of a few milliseconds made the track run dry: the field phone reported 475 underruns.
         val frames = maxOf(minIn, minOut, sampleRate / 50)  // >= 20 ms per callback
+        val outFrames = maxOf(minOut * 4, sampleRate / 8)   // >= 125 ms of playback buffer
 
         var preferredIgnored = false
 
@@ -170,7 +189,7 @@ class AudioEngine(
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(frames * 4)
+            .setBufferSizeInBytes(outFrames * 4)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         output?.let { if (Build.VERSION.SDK_INT >= 23 && !t.setPreferredDevice(it)) preferredIgnored = true }
@@ -191,6 +210,7 @@ class AudioEngine(
         framesQueued = 0
         running.set(true)
         outRate = if (Build.VERSION.SDK_INT >= 23) t.sampleRate else sampleRate
+        outBufFrames = if (Build.VERSION.SDK_INT >= 23) t.bufferSizeInFrames else outFrames
 
         prefInput = input
         capFrames = frames
@@ -211,6 +231,7 @@ class AudioEngine(
             while (running.get()) {
                 val n = sink.onPull(outBuf, frames)
                 if (n > 0) {
+                    outWrites++
                     val w = t.write(outBuf, 0, n, AudioTrack.WRITE_BLOCKING)
                     if (w < n) overruns++
                     if (w > 0) framesQueued += w.toLong()
@@ -297,6 +318,7 @@ class AudioEngine(
                 capRebuilds++
                 capOpen = true
                 capRate = if (Build.VERSION.SDK_INT >= 23) nr.sampleRate else sampleRate
+                inBufFrames = nr.bufferSizeInFrames
                 fails = 0
                 if (lastError.isEmpty()) lastError = "capture running as $capCombo"
                 continue
@@ -311,6 +333,7 @@ class AudioEngine(
                 if (m > 0) for (i in 0 until m) inBuf[i] = shortBuf[i] / 32768f
                 m
             }
+            capReads++   // the denominator for the failure count printed on the panel (defect J)
             if (n > 0) {
                 fails = 0
                 sink.onCapture(inBuf, n)
@@ -497,14 +520,30 @@ class AudioEngine(
         if (capDead) append(" (every input source this device offers was refused)")
         if (capRate > 0 && outRate > 0 && (capRate != sampleRate || outRate != sampleRate))
             append(", DEVICE RESAMPLED (asked $sampleRate, capture $capRate, playback $outRate Hz)")
-        if (capReadFailures > 0) append(", failed reads ").append(capReadFailures)
+        // Rates, not bare counts (defect J): "failed reads 12" and "track underruns 475" cannot be judged
+        // without the denominator, and the denominators differ by three orders of magnitude here.
+        if (capReadFailures > 0)
+            append(", failed reads ").append(capReadFailures).append(" of ").append(capReads)
+                .append(" (").append(pct(capReadFailures, capReads)).append("%)")
+        else if (capReads > 0)
+            append(", failed reads 0 of ").append(capReads)
         if (capRebuilds > 1) append(", capture reopened ").append(capRebuilds - 1).append(" times")
+        if (inBufFrames > 0) append(", capture buffer ").append(inBufFrames).append(" frames")
         append(", capture route ").append(routedInput)
         append(", playback route ").append(routedOutput)
+        if (outBufFrames > 0) append(", playback buffer ").append(outBufFrames)
+            .append(" frames (").append(maxOf(1, outBufFrames / 48)).append(" ms)")
         if (underruns >= 0) append(", track underruns ").append(underruns)
+            .append(if (outWrites > 0) " of " + outWrites + " writes (" +
+                pct(underruns, outWrites) + "%)" else "")
         if (overruns > 0) append(", write short-counts ").append(overruns)
+            .append(if (outWrites > 0) " of " + outWrites else "")
         if (lastError.isNotEmpty()) append(", last error: ").append(lastError)
     }
+
+    /** Percentage with one decimal, for the counters that are meaningless without a scale. */
+    private fun pct(part: Int, whole: Int): String =
+        if (whole <= 0) "0.0" else String.format(java.util.Locale.US, "%.1f", 100.0 * part / whole)
 
     private fun sourceName(src: Int): String = when (src) {
         MediaRecorder.AudioSource.MIC -> "MIC"

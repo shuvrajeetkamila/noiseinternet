@@ -201,10 +201,16 @@ int ni_audio_enumerate(std::vector<AudioDeviceInfo>* out, std::string* why) {
   // diff and not a surprise; see docs/STATUS.md gate G.
   return ni_wasapi_enumerate(out, why);
 #else
+  // The note travels to the status panel as audio_note, which is why it must not name another platform's
+  // backend: the Android panel printed "WASAPI backend is compiled only into the Windows executable"
+  // (defect D), a sentence about a backend the phone does not have and cannot use, in place of anything
+  // actionable. It now says what is true on every platform: the core has no enumerator here, the front
+  // end owns the device list, and the audio line below is where to look.
   if (why)
     *why =
-        "no audio enumeration on this platform build; WASAPI backend is compiled only into the "
-        "Windows executable, and Android enumerates in Kotlin";
+        "the engine has no device enumerator on this build, so the device list and the audio line on this "
+        "screen come from the app's own audio layer (this is expected: the core is platform-neutral and "
+        "the Windows build, the Android app and the console tools each enumerate their own devices)";
   (void)why;
   return NI_ERR_UNSUPPORTED;
 #endif

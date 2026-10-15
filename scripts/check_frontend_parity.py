@@ -54,6 +54,23 @@ CHECKS = [
      r"IDC_COPY_STATUS", [r'@\+id/copy_report"', r"ClipboardManager"]),
     ("match code shown", "the pairing match code has to be readable and comparable on both ends",
      r"sas|match_code", [r"st\.sas|match code"]),
+    # The second copy button: the Windows window has two panes of written results (status and log), and a
+    # copy button that exists for one of them is a copy button that fails the moment someone wants the
+    # other. The Android app has one results pane and one button.
+    ("copy the log pane", "the Windows log is the pane users paste; it needs its own copy button",
+     r"IDC_COPY_LOG", [r'@\+id/copy_report"']),
+    # Defect 71, from the field: the phone's copy button copied an empty pane. Presence of the control is
+    # not enough - the copy has to take the report the reader is looking at. Checked below in detail; this
+    # entry keeps the two platforms honest about *having* a copy report handler.
+    ("copy report handler", "the copy button must copy the report that is on screen",
+     r"IDC_COPY_STATUS", [r"private fun copyReport\(\)"]),
+    # Defect 69: the phone started on session 0 while the PC started on 7, so two apps with the same
+    # passphrase could never pair and nothing on either screen said so.
+    ("session id default", "both front ends must start on the same session id (7)",
+     r'IDC_SESSION.\s*;|mk\(hwnd, L"EDIT", L"7"', [r'sessionEdit\.setText\("7"\)']),
+    # Defect F: a number the engine never measured must not be printed as a reading on either platform.
+    ("not-measured wording", "both front ends must obey the measured flags instead of printing defaults",
+     r"phy_measured", [r"phyMeasured", r"arqMeasured"]),
 ]
 
 def read(path: Path) -> str:
@@ -99,6 +116,23 @@ def main() -> int:
             bad.append(f"windows {label} not masked")
             print(f"\nWINDOWS: the {label} field is created without ES_PASSWORD:\n  "
                   + " ".join(m.group(0).split()))
+
+    # Defect 71 in full: the Android copy handler must take the *report* panes. The old one copied only
+    # `results` (the pane that is empty at rest) and its acknowledgement was overwritten by the 500 ms
+    # refresh loop, so the button answered "nothing to copy yet" for ever.
+    if "private fun copyReport()" not in act:
+        bad.append("android copy handler missing")
+        print("\nANDROID: MainActivity has no copyReport() - the copy button has nowhere to copy from")
+    else:
+        if "reportBase" not in act:
+            bad.append("android copy does not read the report pane")
+            print("\nANDROID: copyReport() does not read reportBase, i.e. the report renderStatus() builds")
+        if re.search(r"val text = results\.text\?\.toString\(\)\.orEmpty\(\)", act):
+            bad.append("android copy still reads only the results pane")
+            print("\nANDROID: the old 'copy results.text only' handler is still present")
+        if "setPrimaryClip" not in act:
+            bad.append("android copy never reaches the clipboard")
+            print("\nANDROID: copyReport() never calls setPrimaryClip")
 
     # The proxy token must not be written to the log pane: that is the pane people paste.
     if re.search(r'proxy_token\(\)\.c_str\(\)[^\n]*say|say[^\n]*proxy_token\(\)\.c_str\(\)', win):

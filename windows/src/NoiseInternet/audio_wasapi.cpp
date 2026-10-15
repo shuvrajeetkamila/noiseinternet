@@ -174,6 +174,10 @@ struct WasapiEngine::Impl {
     WAVEFORMATEXTENSIBLE fmt;
     int ch = 1;
     int buf = 0;
+    // The endpoint that was actually opened, by its Windows friendly name. The status panel printed the
+    // channel counts and buffer sizes but never WHICH device was in use, so a machine with several
+    // microphones could not tell whether Windows picked the one the user plugged in (defect I).
+    std::string name;
   };
   Side render, capture;
   ~Impl() { stop(); }
@@ -225,6 +229,9 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
     *err = flow == eRender ? "no render endpoint selected" : "no capture endpoint selected";
     return NI_ERR_NOAUDIO;
   }
+  // Named here, where the endpoint has just been chosen, and never guessed later.
+  s.name = friendly_name(s.dev);
+  if (s.name.empty()) s.name = id.empty() ? "(system default)" : id;
   HRESULT hr = s.dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                                reinterpret_cast<void**>(&s.ac));
   if (FAILED(hr) || !s.ac) {
@@ -486,11 +493,15 @@ int WasapiEngine::capture(float* mono, int frames) {
 }
 
 std::string WasapiEngine::describe() const {
-  char buf[224];
+  // Names first: "which speaker, which microphone" is the question a field test has to answer, and it was
+  // the one thing this line did not say (defect I).
+  char buf[512];
   _snprintf(buf, sizeof(buf),
-            "WASAPI shared: render %d ch, capture %d ch, %.0f Hz, render buffer %d frames, "
-            "capture buffer %d frames",
-            render_ch_, capture_ch_, fs_, render_buf_, capture_buf_);
+            "WASAPI shared: render \"%s\" (%d ch, buffer %d frames), capture \"%s\" (%d ch, buffer %d "
+            "frames), %.0f Hz%s",
+            p_ && !p_->render.name.empty() ? p_->render.name.c_str() : "(not open)", render_ch_, render_buf_,
+            p_ && !p_->capture.name.empty() ? p_->capture.name.c_str() : "(not open)", capture_ch_,
+            capture_buf_, fs_, capture_silent_ ? " - THE CAPTURE ENDPOINT IS SILENT (muted or removed)" : "");
   return std::string(buf);
 }
 

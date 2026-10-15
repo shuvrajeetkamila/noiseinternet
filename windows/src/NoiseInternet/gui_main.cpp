@@ -353,6 +353,48 @@ struct App {
   // holding the engine lock here would starve the audio path and the test would wait for an ack that can
   // only arrive through the audio path. The node is never destroyed while busy (see WM_CLOSE), which is
   // the only lifetime rule this needs.
+  // Write the captured audio somewhere the user can actually find it, and report the platform's own
+  // reason when that fails. The old code called CreateFileW("ni-last-capture.wav") in the current working
+  // directory and printed "(could not be written)" with no cause and no path - which is why the field
+  // report could not say whether a recording existed (defect B). Three folders are tried in order of
+  // usefulness: next to the program, then Documents\NoiseInternet (created if needed), then %TEMP%.
+  // Returns the full path on success, "" on failure with the reason in *err.
+  std::wstring save_capture_wav(const std::vector<float>& cap, int fs, std::wstring* err) {
+    if (cap.empty() || fs <= 0) {
+      if (err) *err = L"there were no samples to write";
+      return std::wstring();
+    }
+    std::vector<std::wstring> dirs;
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+      std::wstring p(exe);
+      size_t slash = p.find_last_of(L"\\/");
+      if (slash != std::wstring::npos) dirs.push_back(p.substr(0, slash));
+    }
+    std::wstring docs;
+    const wchar_t* up = _wgetenv(L"USERPROFILE");
+    if (up && *up) docs = std::wstring(up) + L"\\Documents\\NoiseInternet";
+    if (!docs.empty()) dirs.push_back(docs);
+    const wchar_t* tp = _wgetenv(L"TEMP");
+    if (tp && *tp) dirs.push_back(tp);
+    std::wstring tried;
+    for (size_t i = 0; i < dirs.size(); ++i) {
+      if (i == 1) CreateDirectoryW(dirs[i].c_str(), nullptr);   // Documents\NoiseInternet may not exist
+      if (GetFileAttributesW(dirs[i].c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+      std::wstring full = dirs[i] + L"\\ni-last-capture.wav";
+      int rc = ni_wav_write_f32(u8(full), &cap[0], cap.size(), (double)fs, 16);
+      if (rc == NI_OK) return full;
+      if (!tried.empty()) tried += L"; ";
+      tried += fmt(L"%ls (%d: %ls)", full.c_str(), rc, w8(ni_strerror(rc)).c_str());
+    }
+    if (err)
+      *err = tried.empty()
+                 ? L"no folder was available to write into (no program folder, no Documents, no TEMP)"
+                 : tried;
+    return std::wstring();
+  }
+
   void run_action(int which) {
     busy.store(true);
     say(L"...running - the window stays live, the link does not");
@@ -363,36 +405,37 @@ struct App {
       } else {
         int64_t now = (int64_t)GetTickCount64();
         if (which == IDC_REC) {
-          // Eight seconds of exactly what the audio backend handed the engine, written to a WAV next to
-          // the program and analysed with the same code the phone runs. Both a measurement and a file the
-          // user can keep, because "what did it hear" is not answerable from a level meter.
-          std::vector<float> cap;
+          // Eight seconds of exactly what the engine received from the microphone, analysed with the same
+          // code the phone runs, and written to a WAV the user can keep - because "what did it hear" is
+          // not answerable from a level meter.
+          //
+          // This used to call audio->capture() from this thread while the pump thread was already reading
+          // the same endpoint, so the two readers split the stream between them: eight seconds of wall
+          // clock produced 107904 samples (2.25 s) and 163968 (3.4 s) in the two 2026-10-15 field runs,
+          // and the link was starved for as long as the button was held (defect C). The engine's own
+          // receive tap records every sample the engine was given, at full length, without touching the
+          // audio threads at all.
           int fs_now = 0;
           {
             std::lock_guard<std::mutex> g(mu);
             if (!audio || !running.load()) {
-              say(L"press Start first: the recorder is the same one the link uses, and it has to be open.");
+              say(L"press Start first: the recorder is the same engine the link uses, and it has to be "
+                  L"running for the tap to see anything.");
               busy.store(false);
               return;
             }
             fs_now = (int)audio->sample_rate();
           }
-          std::vector<float> buf(2048);
-          const int64_t until = (int64_t)GetTickCount64() + 8000;
+          const size_t want = (size_t)((fs_now > 0 ? fs_now : 48000) * 8);
+          node->rx_tap_begin();
+          const int64_t t0 = (int64_t)GetTickCount64();
+          const int64_t until = t0 + 8000;
           while ((int64_t)GetTickCount64() < until) {
-            int got = 0;
-            {
-              std::lock_guard<std::mutex> g(mu);
-              if (!audio || !running.load() || quitting.load()) break;
-              got = audio->capture(&buf[0], (int)buf.size());
-            }
-            if (got > 0) cap.insert(cap.end(), buf.begin(), buf.begin() + got);
-            else Sleep(5);
+            if (quitting.load()) break;
+            Sleep(20);   // the pump thread does the reading; this thread only waits
           }
-          if (cap.size() < 4800) {
-            say(fmt(L"the microphone delivered only %zu samples in 8 s - that is the finding, not a "
-                    L"failure of the recording.", cap.size()));
-          }
+          std::vector<float> cap = node->rx_tap_end();
+          const double seconds = (double)cap.size() / (double)(fs_now > 0 ? fs_now : 48000);
           int pid = 10;
           {
             std::lock_guard<std::mutex> g(mu);
@@ -401,29 +444,29 @@ struct App {
           }
           CaptureDiagnosis d;
           if (!cap.empty() && ni_diagnose_capture(&cap[0], cap.size(), (double)fs_now, pid, &d) == NI_OK) {
-            HANDLE h = CreateFileW(L"ni-last-capture.wav", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr);
-            std::wstring where = L"(could not be written)";
-            if (h != INVALID_HANDLE_VALUE) {
-              CloseHandle(h);
-              if (ni_wav_write_f32("ni-last-capture.wav", &cap[0], cap.size(), (double)fs_now, 16) ==
-                  NI_OK) {
-                wchar_t full[MAX_PATH];
-                DWORD n2 = GetFullPathNameW(L"ni-last-capture.wav", MAX_PATH, full, nullptr);
-                if (n2 > 0 && n2 < MAX_PATH) where = full;
-              }
-            }
+            std::wstring err;
+            std::wstring where = save_capture_wav(cap, fs_now, &err);
             out = w8(d.verdict);
             out += fmt(L"\r\n\r\npeak %.1f dBFS   room %.1f dBFS   loudest %.1f dBFS   clipped %.2f %%"
                        L"\r\nband %.0f-%.0f Hz   shift %.0f ppm   modem %ls",
                        d.peak_dbfs, d.noise_dbfs, d.burst_dbfs, d.clip_pct, d.band_low_hz,
                        d.band_high_hz, d.shift_ppm,
                        d.decodes ? L"DECODES this recording" : L"cannot read a burst in it");
-            out += fmt(L"\r\nnot a guess: %zu samples at %d Hz were analysed. Saved as %ls", cap.size(),
-                       fs_now, where.c_str());
-          } else {
+            // Keep the honest count in view: the button asked for eight seconds and the answer says how
+            // many samples of it the microphone actually delivered (defect C). A run that keeps 2.25 s of
+            // 8 s is a finding about the audio path, not a rounding detail.
+            out += fmt(L"\r\nkept %zu of %zu samples in %.2f s of wall clock (%d Hz)",
+                       cap.size(), want, seconds, fs_now);
+            if (!where.empty())
+              out += fmt(L"\r\nsaved as %ls", where.c_str());
+            else
+              out += fmt(L"\r\nNOT SAVED - no usable file could be written: %ls", err.c_str());
+          } else if (cap.empty()) {
             out = L"nothing was recorded: the microphone handed the engine no samples at all in eight "
                   L"seconds, which is itself the answer (see the audio line in the status panel).";
+          } else {
+            out = fmt(L"the engine kept %zu samples in eight seconds but the analyser refused them (%d "
+                      L"Hz); see the audio line in the status panel.", cap.size(), fs_now);
           }
         } else if (which == IDC_CAL) {
           Calibrator::Report rep;
@@ -494,8 +537,10 @@ struct App {
     cfg.session_id = (uint16_t)atoi(edit_u8(session).c_str());
     cfg.pairing_secret = edit_u8(secret);
     cfg.duplex = (SendMessageW(duplex, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
-    cfg.enable_receiver_proxy = (cfg.role == NI_ROLE_RECEIVER) &&
-                                (SendMessageW(proxy, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const bool proxy_ticked = SendMessageW(proxy, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    cfg.enable_receiver_proxy = (cfg.role == NI_ROLE_RECEIVER) && proxy_ticked;
+    // Named once so the token check below can ask whether a token is used at all (defect A).
+    const bool wants_proxy = cfg.enable_receiver_proxy;
     cfg.enable_giver_fetch = (cfg.role == NI_ROLE_GIVER);
     cfg.proxy_port = 8471;
     cfg_proxy_port_ = (unsigned)cfg.proxy_port;
@@ -505,10 +550,17 @@ struct App {
     // handed to the same NodeConfig the console's --proxy-token feeds.
     {
       std::string tok = edit_u8(token);
-      if (!tok.empty() && tok.size() < 8) {
-        std::wstring m = fmt(L"The proxy token is %d characters long. Either leave the field empty - the "
-                             L"engine then generates a 16-character token and the status panel shows it - "
-                             L"or give at least 8 characters.\n\nNothing has been started.",
+      // Only a receiver gateway uses a token at all: it is the credential that lets a browser on this
+      // machine talk to the proxy. On a giver the field is unused, and refusing to start because it holds
+      // four characters ended a real field run with "The proxy token is 4 characters long" on a machine
+      // that was supplying the internet, not proxying (defect A).
+      const bool token_matters = wants_proxy;
+      if (token_matters && !tok.empty() && tok.size() < 8) {
+        std::wstring m = fmt(L"The proxy token is %d characters long, and this window is started as a "
+                             L"RECEIVER with the proxy ticked - so a token is used. Either leave the "
+                             L"field empty (the engine then generates a 16-character token and the status "
+                             L"panel shows it) or give at least 8 characters.\n\nA giver never uses this "
+                             L"field and is not checked against it.\n\nNothing has been started.",
                              (int)tok.size());
         say(L"refused to start: " + m);
         SetFocus(token);
@@ -630,8 +682,30 @@ struct App {
     t += fmt(L"input %.1f dBFS   bursts seen %llu   decoded %llu   callbacks with no signal %llu\r\n",
              s.in_dbfs, (unsigned long long)s.sync_hits, (unsigned long long)s.frames_received,
              (unsigned long long)s.rx_no_frame);
-    t += fmt(L"snr %.2f dB   rssi %.1f dBFS   noise %.1f dBFS   rtt %.1f ms   loss %.2f %%\r\n",
-             s.snr_db, s.rssi_dbfs, s.noise_dbfs, s.rtt_ms, s.loss_pct);
+    // Its own voice, counted separately (defect 59) and with the repeat decodes named (defect H): "decoded
+    // 48" with no peer anywhere used to read as a peer that answers and delivers nothing.
+    if (s.self_echo_bursts)
+      t += fmt(L"self-echo: %llu own burst(s) heard back through this machine's own microphone%s\r\n",
+               (unsigned long long)s.self_echo_bursts,
+               s.self_echo_repeats
+                   ? fmt(L", plus %llu repeat decodes of the same burst", (unsigned long long)s.self_echo_repeats)
+                         .c_str()
+                   : L"");
+    // A number the engine has never measured must not be printed as one: -120 dBFS and 100.00 % loss are
+    // the snapshot's defaults, and they read as "dead microphone, everything lost" rather than "nothing
+    // has been decoded yet" (defect F). The flags travel with the snapshot; both front ends obey them.
+    if (s.phy_measured)
+      t += fmt(L"snr %.2f dB   rssi %.1f dBFS   noise %.1f dBFS   evm %.2f %%   erle %.1f dB\r\n",
+               s.snr_db, s.rssi_dbfs, s.noise_dbfs, s.evec_pct, s.erle_db);
+    else
+      t += L"snr / rssi / noise / evm: NOT MEASURED YET - no burst has been demodulated on this machine, "
+           L"so these are the engine's default values and not readings\r\n";
+    if (s.arq_measured)
+      t += fmt(L"rtt %.1f ms   loss %.2f %%   retransmit rate %.1f %%\r\n", s.rtt_ms, s.loss_pct,
+               s.frames_sent ? 100.0 * (double)s.retries / (double)s.frames_sent : 0.0);
+    else
+      t += L"rtt / loss: NOT MEASURED YET - nothing has been transmitted yet, so there is nothing whose "
+           L"round trip or loss could be reported\r\n";
     t += fmt(L"mtu %d   link payload %.0f b/s   useful up %.0f / down %.0f b/s\r\n", s.mtu, s.link_bps,
              s.useful_bps_up, s.useful_bps_down);
     t += fmt(L"frames sent %llu  recv %llu  retries %llu  crc-fail %llu  malformed %llu\r\n",
@@ -692,6 +766,16 @@ struct App {
                L"profile, session id and passphrase, and that both are started.", s.in_dbfs);
     t += L"\r\n";
     if (!s.audio_note.empty()) t += fmt(L"NOTE: %hs\r\n", s.audio_note.c_str());
+    {
+      // Which endpoints are open, in this pane rather than only in the log: it is the line that answers
+      // "is it using the microphone I think it is" (defect I).
+      std::string ad;
+      {
+        std::lock_guard<std::mutex> g(mu);
+        if (audio) ad = audio->describe();
+      }
+      if (!ad.empty()) t += fmt(L"audio: %hs\r\n", ad.c_str());
+    }
     t += L"rates are what this session delivered, over whatever path the audio really took - not a "
          L"prediction and not an internet speed.";
     SetWindowTextW(status, t.c_str());
@@ -1027,9 +1111,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   } else {
     app.say(L"pick the devices and press Start. Both ends must use the same session id and passphrase; "
             L"the match code has to be identical on the two screens before you trust anything.");
-    app.say(L"this window is a front end for the engine that passes 8/8 unit tests on MSVC. It has never "
-            L"been run against a speaker and a microphone by anyone, so treat the first run as an "
-            L"experiment, and read the numbers it prints instead of the ones you hope for.");
+    // "passes 8/8 unit tests" lived here and went stale the moment the ninth test was added: the number
+    // is in the build log, not in a sentence inside the program (defect G).
+    app.say(L"this window is a front end for the engine whose unit tests and loopback link test run in CI "
+            L"on every push; the count is in that log, never in this sentence. Two machines have not yet "
+            L"completed an end-to-end transfer over the air, so treat the first run as an experiment and "
+            L"read the numbers it prints instead of the ones you hope for.");
   }
   MSG m;
   while (GetMessageW(&m, nullptr, 0, 0)) {

@@ -304,7 +304,28 @@ bool AcousticLink::is_own_echo(const uint8_t* pdu, size_t n, int64_t now) const 
 void AcousticLink::handle_pdu(const uint8_t* pdu, size_t n, const PhyStats& st, int64_t now) {
   // Before the ARQ sees it, and before peer_seen_ms_ can be touched: this device's own voice.
   if (is_own_echo(pdu, n, now)) {
-    c_.self_echo++;
+    // One physical echo, one count. The decoder is fed overlapping capture windows, so the same own
+    // burst is routinely decoded more than once a few milliseconds apart; counting each decode made the
+    // panel say "self-echo 128" for a single transmitted frame (field log, 2026-10-15). Repeats are kept
+    // in their own counter rather than thrown away, because "the same burst decoded 128 times" is itself
+    // evidence about the capture path.
+    const uint64_t h = ni_hash64(pdu, n);
+    bool counted_before = false;
+    for (int i = 0; i < kEchoCountRing; ++i) {
+      const EchoCount& e = echo_count_[i];
+      if (e.hash == h && e.ms && now - e.ms >= 0 && now - e.ms <= NI_SELF_ECHO_WINDOW_MS) {
+        counted_before = true;
+        break;
+      }
+    }
+    if (counted_before) {
+      c_.self_echo_repeats++;
+    } else {
+      c_.self_echo++;
+      echo_count_[echo_count_next_].hash = h;
+      echo_count_[echo_count_next_].ms = now;
+      echo_count_next_ = (echo_count_next_ + 1) % kEchoCountRing;
+    }
     last_error_ = "own transmission decoded back through the local microphone (self-echo)";
     return;
   }
@@ -513,7 +534,8 @@ std::string AcousticLink::diagnostics_json() const {
     << ", \"self_echo_bursts\": " << c_.self_echo
     << ", \"counters\": {\"rx_bursts\": " << c_.rx_bursts << ", \"tx_bursts\": " << c_.tx_bursts
     << ", \"rx_crc_fail\": " << c_.rx_crc_fail << ", \"rx_no_frame\": " << c_.rx_no_frame
-    << ", \"tx_render_fail\": " << c_.tx_render_fail << ", \"self_echo\": " << c_.self_echo << "}"
+    << ", \"tx_render_fail\": " << c_.tx_render_fail << ", \"self_echo\": " << c_.self_echo
+    << ", \"self_echo_repeats\": " << c_.self_echo_repeats << "}"
     << ", \"arq\": " << arq_.stats().to_json() << "}";
     ;
   return o.str();
