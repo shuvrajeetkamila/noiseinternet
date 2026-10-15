@@ -320,12 +320,26 @@ struct App {
   void pump_loop() {
     WasapiEngine::thread_init();
     std::vector<float> buf(2048);
+    // Samples the engine has produced which the render endpoint had no room for yet. The old loop handed
+    // them straight to a *blocking* render() call instead - up to 50 ms of waiting - while the capture
+    // endpoint's ten-millisecond buffer quietly overwrote itself. The 2026-10-15 field run kept 62304 of
+    // 384000 samples: 84 % of the signal was thrown away before the modem ever saw it, which is exactly
+    // what "the microphone caught 4 bursts and not one decoded" is made of. Holding the leftovers here
+    // costs a few milliseconds of playback latency and nothing else; the sound card is never asked to
+    // wait for this thread.
+    std::vector<float> pend;
     while (!quitting.load()) {
       {
         std::lock_guard<std::mutex> g(mu);
         if (node && audio) {
-          int got = audio->capture(&buf[0], (int)buf.size());
-          if (got > 0) node->feed_capture(&buf[0], (size_t)got);
+          // Drain the capture side: every packet that is waiting, not one per loop. This is a memory copy
+          // and it is the only thing that keeps up with a device buffer of a few milliseconds.
+          for (int k = 0; k < 16; ++k) {
+            int got = audio->capture(&buf[0], (int)buf.size());
+            if (got <= 0) break;
+            node->feed_capture(&buf[0], (size_t)got);
+            if (got < (int)buf.size()) break;   // nothing behind it: the device buffer is drained
+          }
         }
       }
       {
@@ -334,16 +348,29 @@ struct App {
           int need = audio->render_buffer_frames();
           if (need < 240) need = 240;
           if (need > (int)buf.size()) need = (int)buf.size();
-          int got = node->pull_playback(&buf[0], (size_t)need);
-          if (got > 0) audio->render(&buf[0], got, 50);
-          // Tell the link how much of what we just handed over is still unplayed: turn-taking is
-          // timed against played sound, not against samples sitting in the sound card's buffer.
+          if ((int)pend.size() < need) {
+            const size_t base = pend.size();
+            const size_t want = (size_t)need - base;
+            pend.resize(base + want);
+            int got = node->pull_playback(&pend[base], want);
+            pend.resize(base + (got > 0 ? (size_t)got : 0));
+          }
+          if (!pend.empty()) {
+            // timeout 0: write what fits, never wait.
+            int w = audio->render(&pend[0], (int)pend.size(), 0);
+            if (w > 0)
+              pend.erase(pend.begin(), pend.begin() + w);
+            else if (w < 0)
+              pend.clear();   // the endpoint refused it; the audio line says so when it does
+          }
+          // Tell the link how much of what this machine has produced is still unplayed: turn-taking is
+          // timed against played sound, and that includes the samples still held in this buffer.
           int q = audio->queued_frames();
-          if (q >= 0) node->set_tx_backlog((size_t)q);
+          if (q >= 0) node->set_tx_backlog((size_t)q + pend.size());
           node->step((int64_t)GetTickCount64());
         }
       }
-      Sleep(5);
+      Sleep(1);
     }
     WasapiEngine::thread_shutdown();
   }
@@ -384,7 +411,12 @@ struct App {
       if (GetFileAttributesW(dirs[i].c_str()) == INVALID_FILE_ATTRIBUTES) continue;
       std::wstring full = dirs[i] + L"\\ni-last-capture.wav";
       int rc = ni_wav_write_f32(u8(full), &cap[0], cap.size(), (double)fs, 16);
-      if (rc == NI_OK) return full;
+      // ni_wav_write_f32 returns the number of FRAMES WRITTEN, not a status code: it is > 0 on success and
+      // negative on failure. The first version of this helper tested `rc == NI_OK`, so a perfectly good
+      // 62304-frame write was reported as "no usable file could be written ... 62304: unknown error" - and
+      // the field run that produced it was told the recording had not been saved when it was sitting in
+      // its own Downloads folder. (Defect 90.)
+      if (rc > 0) return full;
       if (!tried.empty()) tried += L"; ";
       tried += fmt(L"%ls (%d: %ls)", full.c_str(), rc, w8(ni_strerror(rc)).c_str());
     }
@@ -435,6 +467,7 @@ struct App {
             Sleep(20);   // the pump thread does the reading; this thread only waits
           }
           std::vector<float> cap = node->rx_tap_end();
+          const double wall_s = (double)((int64_t)GetTickCount64() - t0) / 1000.0;
           const double seconds = (double)cap.size() / (double)(fs_now > 0 ? fs_now : 48000);
           int pid = 10;
           {
@@ -455,8 +488,18 @@ struct App {
             // Keep the honest count in view: the button asked for eight seconds and the answer says how
             // many samples of it the microphone actually delivered (defect C). A run that keeps 2.25 s of
             // 8 s is a finding about the audio path, not a rounding detail.
-            out += fmt(L"\r\nkept %zu of %zu samples in %.2f s of wall clock (%d Hz)",
-                       cap.size(), want, seconds, fs_now);
+            // Two different seconds, and the difference between them is a finding, not a rounding
+            // detail: "1.30 s of audio in 8.00 s of wall clock" means 84 % of the microphone's samples
+            // never reached the engine, and a modem cannot read a signal that is mostly missing.
+            out += fmt(L"\r\nkept %zu of %zu samples: %.2f s of audio from %.2f s of wall clock (%d Hz)",
+                       cap.size(), want, seconds, wall_s, fs_now);
+            if (seconds < 0.9 * wall_s)
+              out += fmt(L"\r\nTHE MICROPHONE DELIVERED ONLY %.0f%% OF WHAT THE CLOCK SAYS IT SHOULD - "
+                         L"that is the finding. The audio path is dropping samples (another program "
+                         L"holding the input, a device that will not run at %d Hz, or a USB/Bluetooth "
+                         L"microphone that is delivering late). Nothing about the modem can be judged "
+                         L"from this recording until that number is ~100%%.",
+                         100.0 * seconds / (wall_s > 0.0 ? wall_s : 1.0), fs_now);
             if (!where.empty())
               out += fmt(L"\r\nsaved as %ls", where.c_str());
             else
@@ -617,7 +660,9 @@ struct App {
       node.reset();
       return false;
     }
-    say(fmt(L"this build: engine %hs, window %hs", NI_BUILD_STAMP, L"NOISE INTERNET for Windows"));
+    // %hs takes a NARROW string in MSVC's wide printf. Passing the wide literal here printed
+    // "window N" (the first character and then the terminator) in the first run of this line.
+    say(fmt(L"this build: engine %hs, window %hs", NI_BUILD_STAMP, "NOISE INTERNET for Windows"));
     say(w8(audio->describe()));
     say(fmt(L"started as %ls, profile id %d, session %u, proxy %ls",
             cfg.role == NI_ROLE_GIVER ? L"GIVER" : L"RECEIVER", cfg.profile_id, (unsigned)cfg.session_id,
@@ -713,6 +758,17 @@ struct App {
     else
       t += L"rtt / loss: NOT MEASURED YET - nothing has been transmitted yet, so there is nothing whose "
            L"round trip or loss could be reported\r\n";
+    // Did the microphone's samples actually reach the engine? This is the measurement the 2026-10-15 field
+    // run needed and did not have: 84 % of the signal had been thrown away before the modem saw it, and
+    // every panel line said "no burst decoded" as if the modem were at fault.
+    if (s.capture_pct >= 0.0) {
+      t += fmt(L"microphone: %.0f %% of real time reached the engine%s\r\n", s.capture_pct,
+               s.capture_pct < 99.0
+                   ? L"  <- SAMPLES ARE BEING DROPPED before the modem sees them; that alone stops every "
+                     L"burst from decoding. Close programs that hold the input, and prefer the built-in "
+                     L"microphone over USB/Bluetooth"
+                   : L"");
+    }
     t += fmt(L"mtu %d   link payload %.0f b/s   useful up %.0f / down %.0f b/s\r\n", s.mtu, s.link_bps,
              s.useful_bps_up, s.useful_bps_down);
     t += fmt(L"frames sent %llu  recv %llu  retries %llu  crc-fail %llu  malformed %llu\r\n",

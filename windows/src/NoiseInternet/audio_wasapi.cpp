@@ -310,7 +310,15 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
   // argument is an audio-session GUID - the capture event belongs in SetEventHandle (below), not
   // here. Passing frames/handles was a wrong-unit bug that MSVC's prototype caught for the handle.
   REFERENCE_TIME rate = (REFERENCE_TIME)f.Format.nSamplesPerSec;
-  REFERENCE_TIME hns_buf = rate ? (REFERENCE_TIME)(10000000.0 * buf_frames / rate) : 300000;
+  UINT buf_frames_want = buf_frames;
+  if (flow == eCapture) {
+    // Headroom on the input side: a capture buffer only as deep as one device period (10 ms here) loses
+    // every sample that arrives while the loop is doing something else, and the loop's job includes
+    // handing sound to the render endpoint. Three periods means a hiccup is late, not lost. The packets
+    // still arrive as they are produced - this is not added latency, it is room to fall behind in.
+    buf_frames_want = buf_frames * 3;
+  }
+  REFERENCE_TIME hns_buf = rate ? (REFERENCE_TIME)(10000000.0 * buf_frames_want / rate) : 300000;
   REFERENCE_TIME hns_per = flow == eCapture ? hsn : hpn;
   hr = s.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, init_flags, hns_buf, hns_per,
                         (WAVEFORMATEX*)&s.fmt, nullptr);
@@ -321,6 +329,13 @@ int open_side(IMMDeviceEnumerator* en, EDataFlow flow, const std::string& id, do
     return NI_ERR_IO;
   }
   if (flow == eCapture) s.ac->SetEventHandle(s.ev);
+  {
+    // What the engine actually granted (it rounds up), reported by the audio line so the numbers on screen
+    // are the endpoint's, not our request. (A deeper buffer than asked for is fine; the free-space
+    // arithmetic in render() uses this value too, so it has to be the real one.)
+    UINT granted = 0;
+    if (SUCCEEDED(s.ac->GetBufferSize(&granted)) && granted > 0) s.buf = (int)granted;
+  }
   if (flow == eRender) {
     hr = s.ac->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&s.rc));
   } else {
@@ -448,7 +463,10 @@ int WasapiEngine::render(const float* mono, int frames, int timeout_ms) {
     }
     free_frames = (UINT)(s.buf > (int)padding ? s.buf - padding : 0);
     if (free_frames == 0) {
-      if (timeout_ms >= 0 && (int)(GetTickCount() - t0) > timeout_ms) return written;  // backpressure
+      // timeout_ms == 0 means "write what fits and return": the pump loop holds the leftovers itself and
+      // must not be parked here, because the capture endpoint is only a few milliseconds deep.
+      if (timeout_ms <= 0) return written;
+      if ((int)(GetTickCount() - t0) > timeout_ms) return written;  // backpressure
       Sleep(2);
       continue;
     }

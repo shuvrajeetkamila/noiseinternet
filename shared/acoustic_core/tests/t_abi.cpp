@@ -108,6 +108,14 @@ int main() {
                  "status JSON must carry the engine's own advice sentence");
     NT_CHECK_MSG(s.find("\"tx_gain\"") != std::string::npos,
                  "status JSON must carry the output level the engine is using");
+    // The measurement that says whether the microphone's samples reached the engine at all (defect 91:
+    // 84 % of them did not, and nothing on either panel could say so).
+    NT_CHECK_MSG(s.find("\"capture_pct\"") != std::string::npos,
+                 "status JSON must carry the measured capture rate");
+    NT_CHECK_MSG(s.find("\"build\"") != std::string::npos,
+                 "status JSON must carry the build stamp the front ends print");
+    NT_CHECK_MSG(s.find("\"session_id\"") != std::string::npos,
+                 "status JSON must carry the session id both ends have to match");
 
     // Input validation, which is what the FFI boundary is for: a null buffer is refused, a zero-length
     // read from AudioRecord is a no-op with a real pointer, and neither may ever crash the process.

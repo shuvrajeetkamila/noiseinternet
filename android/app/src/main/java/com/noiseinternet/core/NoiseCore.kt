@@ -156,6 +156,10 @@ class NoiseCore(config: Config) {
         // Did the engine actually measure what those numbers claim to measure? False means the fields
         // hold the engine's default values (-120 dBFS, 0.00 %, 100.00 % loss) and the panel must say
         // "not measured yet" rather than print them as readings (defect F).
+        // Percent of real time the microphone's samples accounted for (node: capture_pct). Far below 100
+        // means the audio path is dropping samples before the modem sees them - a finding about the
+        // capture path, not about the modem. -1 = not measured yet.
+        val capturePct: Double?,
         val phyMeasured: Boolean,
         val arqMeasured: Boolean,
         val tunnelUp: Boolean,
@@ -192,7 +196,8 @@ class NoiseCore(config: Config) {
                         usefulBpsDown = null, framesSent = null, framesReceived = null, selfEchoBursts = null,
                         selfEchoRepeats = null,
                         retries = null, crcFail = null, bytesSent = null, bytesReceived = null,
-                        mtu = null, phyMeasured = false, arqMeasured = false, tunnelUp = false,
+                        mtu = null, capturePct = null, phyMeasured = false, arqMeasured = false,
+                        tunnelUp = false,
                         tunnelDetail = "", internetOk = false,
                         audioNote = "status JSON could not be parsed: ${e.message}", inDbfs = null,
                         syncHits = null, rxNoFrame = null, pairingNote = "", pairing = "unknown",
@@ -238,6 +243,7 @@ class NoiseCore(config: Config) {
                     mtu = if (o.isNull("mtu")) null else o.optInt("mtu"),
                     // Absent means "not measured" on purpose: an older core that does not send the flags
                     // still gets the cautious wording, never a default printed as a reading.
+                    capturePct = (d("capture_pct") ?: -1.0).takeIf { it >= 0.0 },
                     phyMeasured = o.optBoolean("phy_measured", false),
                     arqMeasured = o.optBoolean("arq_measured", false),
                     tunnelUp = o.optBoolean("tunnel_up", false),

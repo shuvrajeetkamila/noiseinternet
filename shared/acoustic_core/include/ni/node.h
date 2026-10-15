@@ -115,6 +115,12 @@ struct StatusSnapshot {
   // (defect F). False means "not measured yet" and both front ends print exactly that instead.
   bool phy_measured = false;    // a burst was demodulated: SNR/RSSI/noise/EVM are real readings
   bool arq_measured = false;    // a frame was transmitted: loss/RTT/throughput mean something
+  // How much of the microphone's output actually reached the engine, in percent of real time. 100 means
+  // the capture path keeps up; 16 meant the Windows pump loop was blocking on the render endpoint while
+  // the capture buffer overwrote itself - 84 % of the signal was gone before the modem saw it, and no
+  // decoder can read a signal that is mostly missing (the 2026-10-15 field run). -1 = not measured yet.
+  // Measured from the samples the engine was handed and its own clock, so it is true on both platforms.
+  double capture_pct = -1.0;
   bool tunnel_up = false, internet_ok = false;
   std::string tunnel_detail, internet_detail;
   int mtu = 0;
@@ -266,6 +272,15 @@ class Node {
   bool peer_netinfo_valid_ = false;
   int64_t peer_netinfo_ms_ = 0;
   PhyStats last_phy_{};
+  // Capture accounting for capture_pct (see StatusSnapshot). Written from feed_capture, read by snapshot().
+  mutable std::mutex cap_mu_;
+  uint64_t capture_samples_ = 0;
+  // The newest clock handed to step(). The apps call step() from their audio pump on every pass, so this is
+  // "now" as far as the engine is concerned, and capture_pct is measured against the engine's own clock
+  // rather than one the UI happens to have.
+  int64_t last_step_ms_ = 0;
+  int64_t capture_first_ms_ = 0;
+  int64_t capture_last_ms_ = 0;
   // Guards last_phy_/phy_measured_: the stats callback runs on whichever thread called feed_capture
   // (the audio pump), the snapshot is read from the UI thread. A PhyStats is a dozen doubles, so the
   // lock costs nothing next to the demodulation that produced it.

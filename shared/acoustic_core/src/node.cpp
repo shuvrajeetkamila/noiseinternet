@@ -151,6 +151,12 @@ int Node::start() {
                     "ends must be given the same passphrase (8+ characters) before Start.";
   }
   running_ = true;
+  {
+    std::lock_guard<std::mutex> g(cap_mu_);
+    capture_samples_ = 0;
+    capture_first_ms_ = 0;
+    capture_last_ms_ = 0;
+  }
   return NI_OK;
 }
 
@@ -188,6 +194,12 @@ int Node::feed_capture(const float* x, size_t n) {
   // is what the FFI boundary documents as NI_OK, and t_abi checks it (the tap below must not change that).
   if (!x) return NI_ERR_PARAM;
   if (!n) return NI_OK;
+  {
+    std::lock_guard<std::mutex> g(cap_mu_);
+    capture_samples_ += n;
+    if (!capture_first_ms_) capture_first_ms_ = last_step_ms_;
+    capture_last_ms_ = last_step_ms_;
+  }
   {
     // The tap, before the link sees anything: this is exactly what the microphone delivered to the
     // engine, which is what the GUI's recorder analyses and saves (see rx_tap_begin).
@@ -251,6 +263,7 @@ int Node::pull_playback(float* out, size_t cap) {
 
 int Node::step(int64_t now) {
   now_ms = now;
+  last_step_ms_ = now;
   if (!running_) return NI_ERR_STATE;
   // Level hunt while unpaired (NodeConfig::assist). The failure this exists for is the most common one
   // in a real room and the least diagnosable from a panel: the far end hears *something*, but the
@@ -770,6 +783,17 @@ StatusSnapshot Node::snapshot() const {
   s.sample_rate = cfg_.fs;
   s.mtu = link_ ? link_->arq().config().max_payload : 0;
   s.audio_note = audio_note_;
+  {
+    // Percent of real time the microphone's samples account for. A number far below 100 is a *finding*
+    // about the audio path, not a modem problem, and it is the first thing to look at when "nothing
+    // decodes": it says the signal was never in the engine's hands.
+    std::lock_guard<std::mutex> g(cap_mu_);
+    s.capture_pct = -1.0;
+    if (capture_first_ms_ > 0 && capture_last_ms_ > capture_first_ms_ && cfg_.fs > 0) {
+      const double el = (double)(capture_last_ms_ - capture_first_ms_) / 1000.0;
+      if (el >= 2.0) s.capture_pct = 100.0 * (double)capture_samples_ / (cfg_.fs * el);
+    }
+  }
   s.tx_gain = tx_gain_;
   if (link_) {
     const ArqStats& a = link_->arq().stats();
@@ -853,6 +877,7 @@ StatusSnapshot Node::snapshot() const {
 std::string StatusSnapshot::to_json() const {
   std::ostringstream o;
   o << "{\"name\": \"" << name << "\", \"role\": \"" << role << "\", \"build\": \"" << build
+    << "\", \"capture_pct\": " << capture_pct
     << "\", \"session_id\": " << session_id << ", \"state\": " << state
     << ", \"state_name\": \"" << state_name << "\", \"running\": " << (running ? "true" : "false")
     << ", \"profile\": \"" << profile_name << "\", \"profile_id\": " << profile_id

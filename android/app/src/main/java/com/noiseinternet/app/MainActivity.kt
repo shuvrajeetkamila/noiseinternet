@@ -404,6 +404,13 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("\nacoustic relay (engine): ").append(if (st.tunnelUp) "up" else "down")
             append(if (st.tunnelDetail.isNotEmpty()) "  " + st.tunnelDetail else "")
             append("\ninternet: ").append(if (st.internetOk) "verified by the engine's own check" else "not verified")
+            st.capturePct?.let {
+                append("\nmicrophone: ").append(String.format(java.util.Locale.US, "%.0f", it))
+                    .append(" % of real time reached the engine")
+                if (it < 99.0) append("  <- SAMPLES ARE BEING DROPPED before the modem sees them; no " +
+                    "burst can decode while that number is low. Close anything else using the microphone " +
+                    "and prefer the built-in one over Bluetooth/USB.")
+            }
             if (svc != null) {
                 append("\naudio: ").append(svc.audioDescription())
                 append("\nphone VPN (VpnService): ").append(svc.tunnelNote)
