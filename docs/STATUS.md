@@ -290,10 +290,25 @@ python3 scripts/raw_to_csv.py                                      # regenerates
    are: digital silence / **this recording decodes** / far too quiet / clipped / **the sound is shifted, by
    N ppm** / no separation / heard-but-not-readable. t_abi pins all of them, including a reproduction of a
    44.1 kHz device played as 48 kHz (which shifts every tone 8.1 % - audible to nobody, fatal to the
-   decoder). One measurement from the third report is still open and is now defect 59: a device decoding
-   its *own* transmissions counts them as frames from the peer, which is why the phone read `peer online`
-   and `decoded 48` with zero bytes received. The fix (hash this end's own transmitted bursts and count the
-   echo separately) is next, not in this build.
+   decoder). Defect 59 (a device decoding *itself* and counting those decodes as a peer's frames - what "peer online,
+   decoded 48, bytes received 0" always was) is **fixed in this build**: the link remembers the hashes of
+   the last 32 burst PDUs it transmitted, in both the transmitted form and the form the receiver sees
+   (the decoder strips the 2-byte burst-length prefix), and drops a decoded burst that matches one of them
+   before the ARQ or `peer_seen_ms_` can see it, counting it in a new `self_echo` counter that both UIs now
+   show. `tests/t_self_echo.cpp` renders a real burst, feeds those samples back into the same link's receive
+   path, and requires 20/20 recognised, `peer_online()` false and the state still below FRAME_OK - plus a
+   control that keeps this from being "ignore everything": a burst rendered by a *different* modem object is
+   still accepted.
+
+   The same pass fixed the receiver proxy's response path, which had never been able to deliver an
+   authenticated answer: a re-keyed client entry that was a copy of freed memory (`fd = -1`, so the response
+   was flushed nowhere while the browser hung - 61), a request sent before its stream id existed (62), a
+   response body that travelled with its head and was left in the read buffer (63), the client's own request
+   returned to it in place of the response because the request head was never consumed (64), a body split
+   across two socket reads answered with `400` (65), and an empty proxy token that authenticated *everyone*
+   because `handle_readable` tested the option string instead of the generated token (60). All six are
+   covered by `tests/t_proxy_auth.cpp`, which drives the shipped gateway over a real loopback socket, and
+   both front ends now have the proxy-token field defect 27 was about.
 1. **Gate C, remaining half.** Pairing under loss (defect 26) is the cheapest hard thing left: the counters already say the giver's bursts never arrive, so start from the sim's loss injection, not from the handshake.
    Next, the 82-byte-profile 2 kB run and multipath, which now each succeed 1 trial in 3 - a retry budget that gives up (defect 22) is plausibly all that separates them. A 2 kB transfer already completes on two profiles; what is left is the
    ~10 % frame loss in the streaming model (defect 20): a per-symbol timing/phase tracker in the receiver
