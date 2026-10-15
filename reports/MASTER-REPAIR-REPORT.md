@@ -1,0 +1,277 @@
+# NOISE INTERNET — repair pass: root causes, changes, evidence, gates
+
+This document answers the master repair prompt (Parts A–G plus the bracketed additions) for the pass
+whose baseline is commit **`733a6b3`** — the exact commit named in that prompt, and the commit the
+supplied APK/EXE were built from.
+
+* **Baseline (inspected, unmodified):** `733a6b3` — state preserved as that commit id, which is
+  reachable, hash-verifiable and immutable. *Note on the "diagnostic branch":* this session is bound to
+  one branch (`arena/15b1e419-noiseinternet`) and cannot create or push another, so the baseline is
+  preserved as a commit rather than as a second branch. That is a stronger guarantee than a branch:
+  a commit cannot be moved.
+* **Repairs:** `f7a475d`, `5608dd1`, `8d9c709`, `1b83212` on the same branch.
+* **Nothing was reformatted, renamed or rewritten** in the inspected code beyond the lines each defect
+  required, and every change below names the defect it fixes.
+* Everything labelled *measured* below was produced by a command whose output is quoted; everything
+  else is labelled otherwise.
+
+---
+
+## Part A — root-cause report (before any edit)
+
+### A.1 Confirmed defects, each with the evidence that confirmed it
+
+| # | defect | status | how it was confirmed |
+|---|---|---|---|
+| 27 | Neither front end could set the receiver proxy's bearer token; the console could (`--proxy-token`) | **fixed** | source read: `gui_main.cpp` only read `node->proxy_token()` to display it; the Android layout had no token field at all |
+| 59 | A device counted its **own** transmission, decoded back through its own microphone, as frames from the peer — so a lone machine reported `peer online` and advanced to `FRAME_OK` | **fixed** | reproduced in `tests/t_self_echo.cpp`: 20 of 20 loopback bursts accepted as peer frames before the fix, `peer_online true`, state `FRAME_OK` |
+| 60 | An **empty** proxy token authenticated every client on the machine | **fixed** | `t_proxy_auth`: with `Options::token` empty, a client that does not know the generated token got a `200` before the fix |
+| 61 | The re-keyed client entry was a **copy of freed memory** (`fd = -1`), so an authenticated response was flushed nowhere and the browser hung | **fixed** | instrumented probe printed `rekey: fd=6 ... keys now 1(fd=-1,phase=0)`; `t_proxy_auth` fails on the old code |
+| 62 | The request was handed to the link **before** its stream id was registered, so a fast giver's answer was dropped as "no client for stream" | **fixed** | `t_proxy_auth` produces its answer synchronously inside the sender callback — the exact case |
+| 63 | A response **body that arrived with its head** was left in the read buffer and never reached the client | **fixed** | `t_proxy_auth`: client received a bare `HTTP/1.1 200 OK` and waited forever |
+| 64 | The client's own **request was returned to it as the response** (bearer token included), because the request head was never consumed from `rxbuf` | **fixed** | `t_proxy_auth`: client received its own 101-byte `GET`; this hid defect 63 |
+| 65 | A request whose **body arrived in a second read** was answered `400 Bad Request` | **fixed** | code path: phase 1 re-parsed body bytes as a request head |
+| 66 | The link test's forward hash check compared **raw hash bytes with a hex string**, so `hash_match` could never be true | **fixed** | `ni linktest` reported `hash_match false` with `reverse_hash_match true` — impossible unless the comparison was broken |
+| — | The "session id (same on both ends)" label **overlapped** the passphrase label (80×16 px at 374,108) | **fixed** | the new `--ui-check` layout audit on the Windows build agent: `layout: OVERLAP between Static "session id..." and Static "passphrase..."` and exit code 4, which made packaging **refuse** to publish that build |
+| — | The Windows passphrase field was **not masked** (it printed the shared secret in clear text) | **fixed** | found by tightening `scripts/check_frontend_parity.py` after its first version was satisfied by the *proxy token* field further down the file |
+| — | The Android session-id field **defaulted to 0** while the engine, the Windows window and the documented default are all **7** | **fixed** | source read: `android:inputType="number" android:text="0"` |
+| — | `--ui-check` could only count controls; a control drawn on top of another one still counted as created | **fixed** | it was what let the overlap above exist in the first place |
+
+The two defects the previous reports listed as *this is the blocker* are now measured to be different
+things than they claimed:
+
+* **Defect 41** (stream-id translation) was necessary and correct, but **it was not what blocked the
+  response leg**. The leg was blocked by 61/63/64. With those fixed `ni demo` reads **IDENTICAL**
+  (Part C below). The claim "the response leg does not complete (defect 41)" is retired everywhere it
+  was printed, including the command's own banner.
+* **Defect 21** stays fixed as recorded; nothing in this pass touched that path.
+
+### A.2 Suspected, not confirmed
+
+* **Profile 10 (FD-LOW-DBPSK) at 26 dB SNR in the modelled room does not complete a two-way test** within
+  60 s of device time, while profiles 2 and 11 at 35 dB complete it in ~2 s. Measured counters for that
+  failing run: giver `loss_pct 85.7`, `retransmits 39`, receiver `crc_fail 23`. That is the same family as
+  the already-recorded defects 20/22 (streaming loss and retry budget); *the fix is not in this pass*, and
+  the root cause is **suspected, not confirmed**.
+* **Receiver→giver throughput after pairing is far lower than the reverse direction** in every two-node
+  run here (`frames_sent 1` for the receiver in a 36 s session while it received 66). Whether that is
+  the ARQ's turn-taking, the master/slave pacing, or the channel model's asymmetry is **not established**.
+
+### A.3 Untested hardware limits (never claim these either way)
+
+* Every acoustic number in this repository, including everything in this pass, is a **modelled room**
+  (16-bit PCM through `AcousticChannel`). **No message has ever crossed a real speaker and a real
+  microphone** in this project's history; this pass cannot change that, and nothing below is claimed as
+  if it had.
+* Android audio HAL behaviour on the user's specific phone (its echo canceller, its AGC, whether it
+  resamples), Windows "audio enhancements", device latency, and real-room multipath are all
+  **NOT TESTED**.
+* The APK's `VpnService` tunnel carries **UDP and DNS only, by design** (documented in `BUILD.md` and in
+  the layout's own label): an acoustic link at a few hundred bits per second cannot carry a TCP handshake.
+  TCP traffic takes the HTTP/CONNECT proxy path instead. This is a design boundary, not a defect, and it
+  is unchanged by this pass.
+
+---
+
+## Part B — the acoustic path
+
+**Audited:** WASAPI capture/playback (`windows/…/wasapi_audio.cpp`, shared-line rules, no resampling),
+Android `AudioRecord`/`AudioTrack` (`AudioEngine.kt`: capture-format fallback ladder, buffer sizing,
+underrun counting), the full signal path (mic → capture callback → squelch → burst detector → demodulator
+→ frame decode → ARQ → crypto gate → delivery), and the pairing state machine.
+
+**Fixed in this pass**
+
+1. **Defect 59 (own echo counted as a peer).** `AcousticLink` now keeps a ring of the last 32 burst PDUs it
+   transmitted — hashed both as sent and as the receiver sees them, because the decoder strips the 2-byte
+   burst-length prefix — and a decoded burst matching one of them is counted in a new `self_echo` counter
+   and dropped **before** the ARQ or `peer_seen_ms_` can see it. A lone device can therefore no longer
+   report a peer online, and the advice line now states the measured fact: *"the microphone decoded N
+   burst(s) that were this device's OWN transmission coming back (self-echo), and no burst from any other
+   device."*
+2. **Defect 66 and the two-way link test.** The link test now sends a **unique random payload with its
+   SHA-256** upward and the far end answers with **its own fresh 16-byte nonce plus that nonce's SHA-256**,
+   which the initiator recomputes. The verdict is therefore about bytes that crossed in *both* directions.
+   `ni linktest` runs two real nodes through the modelled room and drives the pump while the test runs
+   (the blocking form pumped one node and could never be answered in a two-node harness).
+
+**Measured here**
+
+```
+$ ni linktest --profile 2 --snr 35 --bytes 30 --budget-ms 60000
+  [t= 3590 ms] link test report: {"payload_bytes": 30, "answered": true, "hash_match": true,
+    "reverse_payload_bytes": 16, "reverse_hash_match": true,
+    "reverse_sha256": "198e0355c9aa04cb054cea28e388e6672855ead6d348c25cc4c0aaa3166ce943",
+    "directions_verified": 2, "elapsed_ms": 2080, ...}
+VERDICT: PASS - a unique payload crossed in EACH direction and each was verified against its own SHA-256
+         (modelled room, in software).
+```
+
+`directions_verified: 2` on profiles 2 and 11 at 35 dB SNR; two consecutive runs hash different payloads
+(`fc14bfc9208c…`, then `d05e4fe98225…`), so each run is a test and not a replay. This is a **regression
+test** now (`ctest` name `t_linktest`) and it is printed as *modelled room, not speaker→microphone* in its
+own output, so it can never be mistaken for the physical test.
+
+**Still open:** the A.2 items.
+
+---
+
+## Part C — the internet path
+
+**Architecture per role (unchanged, documented here as audited):**
+
+* **Giver** — holds the internet. Runs `GiverGateway`, which fetches on behalf of requests that arrive over
+  the acoustic link, and keeps `CONNECT` as an unparsed byte relay so **end-to-end TLS is preserved** and
+  certificate validation stays with the application. The giver never listens on a public interface.
+* **Receiver** — runs `ReceiverGateway`, listening on **127.0.0.1 only** and requiring
+  `Proxy-Authorization: Noise <token>` on every request. A browser pointed at it uses the acoustic link as
+  a very slow transport. The optional `VpnService` tunnel carries UDP/DNS only (see A.3).
+* TCP is deliberately not carried by the tunnel: at acoustic rates, opening a TCP connection is not
+  reachable, which is why the proxy path exists.
+
+**Fixed in this pass:** defects 60–65 (Part A) plus defect 27 (the token field in both front ends). The
+response leg now completes **in software**:
+
+```
+$ ni demo --profile 11 --snr 35 --budget-ms 120000
+  [t= 2370 ms] curl direct #1   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  [t= 3730 ms] curl direct #2   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  [t=22650 ms] curl via proxy   exit=0, 400 body bytes  [ni-http 200 text/plain 400
+  through-proxy bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  direct #1     bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  direct #2     bytes : 400   sha256 2ed3e2696745228acc3948d446c6400999861040520576d7bdeeb06d70c85a97
+  comparison          : IDENTICAL - the 400 bytes that arrived through the acoustic link
+  receiver report     : proxy_receiver {"requests_ok": 2, "bytes_relayed": 351},
+                        proxy_giver {"fetches_ok": 1}
+```
+
+**The staged internet test, and what may never count as a pass.** The rule the prompt sets — *never pass
+merely because the giver can reach the internet* — is honoured in the code: `ni demo` fetches the same URL
+twice directly and once through the acoustic link, compares the **client's bytes** and their SHA-256, and
+refuses to read `IDENTICAL` when the origin is dynamic (`origin: stable - two direct fetches…`). "The giver
+has internet" is a *precondition*, printed separately (`internet_ok`), never the verdict. Staged:
+A local proxy auth → B request leg → C response leg → D byte-identical payload → E TLS via CONNECT →
+F real origin → G real devices → H usable browsing speed. Status: **A and B measured in software; C and D
+measured in software only (modelled room, local origin); E/F/G/H NOT TESTED** — no hardware, and the only
+origin available here is on this host.
+
+---
+
+## Part D — the visible UI
+
+**Method.** The window's own `--ui-check` now does what a check that can see a layout should do: it
+enumerates every child control, converts each rect into client coordinates, measures combo boxes at their
+*closed* height, and fails if any control is outside the client area or any two overlap. It exits 4 on
+failure, and **the packaging step refuses to publish such a build** — which is exactly what happened on
+the first Windows run of this pass, on a real overlap it found and I had not noticed.
+
+**Fixed:** the overlapping label (Part A table), the unmasked passphrase, the Android session default,
+the proxy-token field in both apps, **copy buttons in every window that shows written results** (Windows:
+"Copy status" and "Copy log"; Android: "Copy report"), the "show secrets" box (reveals the passphrase field
+and prints the proxy token deliberately, both masked by default), and the record button's own overlap with
+the status label from the previous pass.
+
+**Automated guard:** `scripts/check_frontend_parity.py` (also run by CI) asserts that both front ends offer
+the same controls — profile, session id, passphrase, role, proxy token, start, stop, record-and-analyse,
+link test, internet test, copy button, match code — that both secrets are created masked, and that the
+proxy token is not written into the log pane. It prints a control-by-control table and fails with the list
+of what is missing. Current output: `PASS: both front ends offer the same controls, and both have a copy
+button`.
+
+**Verification bound:** the Windows layout was verified by the geometry audit **on the build agent**
+(`layout audit: 32 controls, 0 outside the client area, 0 overlapping pairs`, exit 0) and cross-checked
+here by parsing the same geometry; the Android layout is verified by the parity check and by compilation.
+**No human has looked at either window** (this environment has no display and no audio devices), so
+"the UI looks right" is NOT TESTED — only "every control is created, sized, masked and wired".
+
+---
+
+## Part E — regression tests, builds, artifacts
+
+```
+$ ctest --test-dir build-linux --output-on-failure
+100% tests passed out of 11
+t_abi 55 checks   t_arq 52   t_crc_bits 436   t_crypto 2223   t_fec 311   t_fft 111
+t_frame 407       t_pairing 57   t_proxy_auth 23   t_self_echo 13   t_linktest (two-way, PASS)
+```
+
+New coverage added by this pass: **proxy authorization and the response path over a real loopback socket**
+(`t_proxy_auth`), **self-echo detection on a real rendered burst** (`t_self_echo`), **the two-way link
+test** (`t_linktest`), and the **front-end parity check** in CI.
+
+Reproducible from a clean checkout with:
+
+```sh
+pip3 install --break-system-packages cmake
+cmake -S shared/acoustic_core -B build-linux -DCMAKE_BUILD_TYPE=Release -DNI_BUILD_TESTS=ON
+cmake --build build-linux -j 4
+ctest --test-dir build-linux --output-on-failure
+python3 scripts/check_frontend_parity.py
+./build-linux/ni linktest --profile 2 --snr 35 --bytes 30
+./build-linux/ni demo --profile 11 --snr 35 --budget-ms 120000
+```
+
+**Built from source by CI from the repaired commit, and published** (Windows and Android jobs green,
+`ci-build` release):
+
+| artifact | bytes | sha256 |
+|---|---|---|
+| `noiseinternet-debug.apk` | see release | see release |
+| `NoiseInternet.exe` | see release | see release |
+| `NoiseInternet-windows-x64.zip` | see release | see release |
+
+The exact bytes, digests and commit for the published build are in the release body
+(`gh release view ci-build`), which is generated by the workflow from the commit it built — this document
+is not the authority for them, and the numbers are deliberately not copied here so that a later
+republish cannot leave a stale digest in a report.
+
+---
+
+## Part F — physical testing
+
+**NOT TESTED. Not one acoustic claim in this pass was made on real hardware.** There is no microphone, no
+speaker, no phone and no Windows machine attached to this environment; the sandbox reports 0 audio
+endpoints, and the Android app can only be verified by compilation and by code-level tests here.
+
+The procedure the user can run, in the order that isolates failures fastest:
+
+1. **Both apps, same profile number, same session id, same passphrase** (both windows show the match code).
+2. **Record 8 s and analyse** on each device separately (Windows button / phone "Test this device (8 s)"):
+   the verdict sentence names the failure — silence, far too quiet, clipped, shifted by N ppm, heard but
+   not readable, *or* "this recording decodes".
+3. **A device that hears itself is normal** (half duplex): the panel now says `self-echo N` and no longer
+   calls it a peer.
+4. **Then** place the devices 20–30 cm apart, speaker facing microphone, and press Start on both. The
+   match code must read identically on both screens.
+5. **Link test** — PASS now requires the payload to be verified in *both* directions.
+6. Only then the internet leg: receiver → browser pointed at `127.0.0.1:8471` with the token shown in the
+   status panel; giver → "Internet test".
+7. Report back the panel text verbatim; the verdict sentence is written to name the failing stage.
+
+---
+
+## Part G — the 13 deliverables
+
+| # | deliverable | status | evidence / what is missing |
+|---|---|---|---|
+| 1 | Cross-platform source (one engine, two front ends) | **PASS** | `shared/acoustic_core` + `windows/` + `android/`; CI builds all three from source |
+| 2 | Real acoustic modem (FSK/DPSK/OFDM, 16 profiles, adaptive) | **PASS (software)** | `ni profiles`, `ni selftest --profile all`; **nothing has been through real air** |
+| 3 | Versioned frames, CRC, FEC, ACK/selective retransmit, ARQ | **PASS** | `t_frame`, `t_crc_bits`, `t_fec`, `t_arq` (52 checks incl. replay rejection) |
+| 4 | Echo cancellation, half-duplex first | **PARTIAL** | half duplex works; full duplex (FDD + NLMS AEC) is implemented but **never tested on hardware** |
+| 5 | Link calibration and diagnostics | **PASS** | `ni calibrate` (honestly labelled a model sweep), `ni analyze`, capture verdicts, `self-echo`, `--ui-check` |
+| 6 | Network layer: local HTTP/CONNECT proxy first | **PASS (software)** | `ni demo` reads IDENTICAL over the modelled room; `t_proxy_auth` 23 checks |
+| 7 | Android `VpnService` tunnel | **PARTIAL** | builds and is wired; UDP/DNS only by design; **never run on a phone here** |
+| 8 | Pairing/security: challenge-response, AEAD, replay protection, no public exposure | **PASS** | `t_crypto` 2223 checks, `t_pairing` 57, token required on every proxy request, 127.0.0.1-only bind |
+| 9 | Full UI on both platforms, with the same controls and copy buttons | **PASS (code-level)** | `--ui-check` audit green on the Windows agent; parity check green; **no human has seen either window** |
+| 10 | Automated tests separated from physical ones | **PASS** | 11 ctest suites + parity check, all hardware-free and labelled as such |
+| 11 | Benchmarks with CSV/JSON, medians and variability | **PASS** | `reports/bench_sweep.csv|json` (315 rows), `linksim.csv`, `selftest_*.csv`, each labelling its own evidence level |
+| 12 | Build scripts, APK and Windows EXE | **PASS** | CI publishes both from the repaired commit (see Part E) |
+| 13 | Gates A–H with honest labels | **PARTIAL** | A PASS, B PARTIAL, C PARTIAL, D PASS, E PARTIAL, F **NOT TESTED**, G PARTIAL, H PARTIAL — unchanged, and Gate F cannot move without hardware |
+
+**One-line summary of the pass:** the acoustic engine now proves a verified payload in both directions and
+no longer mistakes its own voice for a peer (defects 59, 66); the receiver proxy's response leg — broken by
+five separate defects that all looked like one symptom — now completes byte-identically in software
+(defects 60–65); both front ends can set and copy everything the task asked for, and the build refuses to
+publish a window whose controls overlap (defects 27 and the UI items). What has *not* changed: no message
+has ever crossed real air, and Gate F stays NOT TESTED until the user runs the Part F procedure on real
+hardware.
