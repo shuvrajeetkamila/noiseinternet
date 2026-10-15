@@ -808,7 +808,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       a->spk = mk(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 304, 78, 280, 260, a->font, IDC_SPK);
       mk(hwnd, L"STATIC", L"profile (rate/robustness trade-off)", 0, 16, 108, 280, 16, a->font, 0);
       a->prof = mk(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 16, 126, 280, 320, a->font, IDC_PROFILE);
-      mk(hwnd, L"STATIC", L"session id (same on both ends)", 0, 304, 108, 150, 16, a->font, 0);
+      // "session id", not "session id (same on both ends)": that label was 150 px wide from x=304 and ran
+      // into the passphrase label at x=374. The rectangles overlapped and the text sat on top of the
+      // other label's text. The "(same on both ends)" instruction stays on the passphrase, where there is
+      // room for it, and the window's own help line already says both ends must match. Found by the
+      // --ui-check layout audit, which the packaging step now refuses to publish past.
+      mk(hwnd, L"STATIC", L"session id", 0, 304, 108, 64, 16, a->font, 0);
       a->session = mk(hwnd, L"EDIT", L"7", ES_NUMBER | WS_BORDER, 304, 126, 60, 22, a->font, IDC_SESSION);
       mk(hwnd, L"STATIC", L"passphrase (same on both ends)", 0, 374, 108, 210, 16, a->font, 0);
       // ES_PASSWORD, at last: the pairing passphrase is a shared secret and this field used to print it

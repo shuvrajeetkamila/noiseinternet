@@ -153,6 +153,12 @@ class Node {
   // ---- user actions (all measured, none of them a stub) ----
   int calibrate(int64_t now_ms, Calibrator::Report* out);   // runs a full calibration exchange
   int test_link(int64_t now_ms, int payload_bytes, std::string* report);  // hash-compared ping
+  // Non-blocking form: send, then poll link_test_finished() while your own transport moves audio, and
+  // read link_test_report(). test_link() is the blocking wrapper and is only correct for callers that
+  // pump both ends themselves.
+  int start_link_test(int64_t now_ms, int payload_bytes);
+  bool link_test_finished() const;
+  std::string link_test_report(int64_t waited_ms) const;
   // Does this machine hear its own speaker? The one question a user with a pair that will not work
   // cannot answer alone, and the one that needs no second device: a running node is always transmitting
   // (keepalive bursts, or the assist beacon), so whatever its own microphone decodes during those
@@ -189,8 +195,15 @@ class Node {
     int64_t t0 = 0, t1 = 0;
     size_t bytes = 0;
     std::string expect_sha, got_sha;
+    // Reverse leg: the nonce the responder generates for this run and the hash that came back with it.
+    // 16 bytes of random per run is what makes the return trip a payload test rather than a verdict copy.
+    size_t reverse_bytes = 0;
+    bool reverse_ok = false;
+    std::string reverse_sha;
   } lt_, lt_in_;
   std::string test_report;
+  static const size_t kRevNonce = 16;   // bytes of fresh randomness in the return-direction payload
+  std::vector<uint8_t> lt_body_;        // the payload this end generated for the current link test
 
   const std::string& proxy_token() const { return tok_; }
   std::string last_error() const { return err_; }

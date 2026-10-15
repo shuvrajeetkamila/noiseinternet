@@ -1050,6 +1050,107 @@ struct LocalOrigin {
 };
 #endif
 
+// Two real nodes, one modelled room, and the link test the task asks for: a unique random payload
+// with its SHA-256 in each direction. The ONLY path between the two nodes is 16-bit PCM shaped by the
+// channel model - no socket, pipe or shared buffer carries the test bytes - but this is still a
+// *modelled* room, not speaker-to-microphone, and the printed verdict says so.
+int cmd_linktest(const Opts& o) {
+  bool badp = false;
+  int pid = profile_arg(o, 10, &badp);
+  if (badp) return bad_profile(o);
+  double fs = o.num("fs", 48000);
+  int bytes = (int)o.num("bytes", 228);
+  int64_t budget = (int64_t)o.num("budget-ms", 120000);
+  printf("NOISE INTERNET two-way link test (in software, over the channel model)\n");
+  printf("  profile    : %s\n", ni_profile(pid).name);
+  printf("  payload    : up %d bytes + a fresh 16-byte nonce back, each with its own SHA-256\n", bytes);
+  printf("  evidence   : the only path between the two nodes is 16-bit PCM shaped by AcousticChannel.\n");
+  printf("               This is a MODELLED ROOM, not a speaker and a microphone: a PASS here means the\n");
+  printf("               protocol and the modem can carry a verified payload both ways, and says nothing\n");
+  printf("               yet about any particular pair of physical devices.\n\n");
+  fflush(stdout);
+
+  NodeConfig gc;
+  gc.role = NI_ROLE_GIVER;
+  gc.is_master = true;
+  gc.profile_id = pid;
+  gc.fs = fs;
+  gc.session_id = 0x51;
+  gc.pairing_secret = o.get("secret", "noise-internet-linktest");
+  gc.enable_giver_fetch = false;
+  gc.enable_receiver_proxy = false;
+  gc.sim_channel = true;
+  gc.name = "giver";
+  gc.arq_wait_ms = 120000;
+  gc.ch = channel_from(o);
+  gc.ch.snr_db = o.num("snr", 26);
+  gc.ch.seed = 4242;
+  gc.ch.multipath = o.flag("multipath") && !o.flag("no-multipath");
+  NodeConfig vc = gc;
+  vc.role = NI_ROLE_RECEIVER;
+  vc.is_master = false;
+  vc.name = "receiver";
+  vc.ch.seed = 99;
+
+  Node giver(gc), recv(vc);
+  if (giver.configure() != NI_OK || recv.configure() != NI_OK) {
+    fprintf(stderr, "configure failed: %s | %s\n", giver.last_error().c_str(),
+            recv.last_error().c_str());
+    return 1;
+  }
+  if (giver.start() != NI_OK || recv.start() != NI_OK) {
+    fprintf(stderr, "start failed: %s | %s\n", giver.last_error().c_str(),
+            recv.last_error().c_str());
+    return 1;
+  }
+  giver.set_pace_tx(true);
+  recv.set_pace_tx(true);
+  int64_t t = 0;
+  Pump p2(&giver, &recv, fs, &t);
+  bool paired = false;
+  while (t < 60000 && !paired) {
+    p2.step(t + 5);
+    Pairing* pa = giver.link()->pairing();
+    Pairing* pb = recv.link()->pairing();
+    if (pa && pb && pa->state() == NI_PAIR_DONE && pb->state() == NI_PAIR_DONE) paired = true;
+  }
+  if (!paired) {
+    printf("  pairing did not complete within 60 s of device time.\n");
+    printf("  giver    : %s\n", giver.status_json().c_str());
+    printf("  receiver : %s\n", recv.status_json().c_str());
+    printf("\nVERDICT: FAIL - the link test cannot run before the two ends pair.\n");
+    return 2;
+  }
+  printf("  [t=%5lld ms] paired, match code %s on both ends\n", (long long)t,
+         giver.link()->pairing()->sas().c_str());
+
+  int rc = giver.start_link_test(t, bytes);
+  if (rc != NI_OK) {
+    printf("  the link test could not be started: %s\n", ni_strerror(rc));
+    return 4;
+  }
+  // Drive BOTH nodes while the test's retries play out. This is the whole reason start_link_test exists:
+  // the blocking form pumps one node and therefore can never be answered.
+  int64_t until = t + (int64_t)o.num("budget-ms", 120000);
+  int64_t t0 = t;
+  while (t < until && !giver.link_test_finished()) p2.step(t + 5);
+  std::string report = giver.link_test_report(t - t0);
+  printf("  [t=%5lld ms] link test report: %s\n", (long long)t, report.c_str());
+  if (!giver.link_test_finished()) {
+    // When the test does not complete, the counters are the only useful thing left: which direction is
+    // deaf, whether bursts arrive at all, and what the ARQ thinks is outstanding.
+    printf("  giver    : %s\n", giver.status_json().c_str());
+    printf("  receiver : %s\n", recv.status_json().c_str());
+  }
+  const bool both = report.find("\"directions_verified\": 2") != std::string::npos;
+  printf("\nVERDICT: %s\n", both
+             ? "PASS - a unique payload crossed in EACH direction and each was verified against its own "
+               "SHA-256 (modelled room, in software)."
+             : "PARTIAL/FAIL - see directions_verified in the report above: 2 means both directions "
+               "verified, 1 means only the forward leg, 0 means neither.");
+  return (rc == NI_OK && both) ? 0 : 3;
+}
+
 int cmd_demo(const Opts& o) {
   bool bad = false;
   double fs = o.num("fs", 48000);
@@ -1369,6 +1470,8 @@ int usage() {
       "  ni decode --in rec.wav               recover a payload from a recording\n"
       "        [--profile P | auto-sweep] [--expect-sha256 H] [--save out.bin]\n"
       "  ni selftest [--profile all]          loopback PHY test through the channel model\n"
+      "  ni linktest [--bytes N] [--profile P] two real nodes over the channel model: a unique payload\n"
+      "                                       with its SHA-256 in EACH direction (not speaker->mic)\n"
       "  ni bench --csv f --json f            profile x speaker x distance x SNR sweep\n"
       "  ni linksim [--trials N]              two-node half-duplex session over the model\n"
       "  ni duplex                            full-duplex band split + NLMS echo canceller\n"
@@ -1400,6 +1503,7 @@ int main(int argc, char** argv) {
   if (cmd == "calibrate") return cmd_calibrate(o);
   if (cmd == "bench") return cmd_bench(o);
   if (cmd == "linksim") return cmd_linksim(o);
+  if (cmd == "linktest") return cmd_linktest(o);
   if (cmd == "duplex") return cmd_duplex(o);
   if (cmd == "demo") return cmd_demo(o);
   if (cmd == "audit") return cmd_audit(o);

@@ -261,6 +261,14 @@ int test_empty_token_generates_one() {
 }
 
 int main() {
+#if defined(_WIN32)
+  // Winsock has to be initialised before the first socket() call. ReceiverGateway does it in its own
+  // constructor, but pick_port() probes for a free port BEFORE the gateway exists, so on Windows the
+  // probe found no sockets at all and the test failed with "port > 0" - the first red Windows job for
+  // this test, and the reason the initialisation is here rather than assumed.
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
   int bad = 0;
   bad += test_refuses_wrong_token_and_serves_the_right_one();
   bad += test_empty_token_generates_one();

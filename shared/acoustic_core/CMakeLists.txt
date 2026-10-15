@@ -92,4 +92,11 @@ if(NI_BUILD_TESTS)
     target_link_libraries(${t} PRIVATE ni_core)
     add_test(NAME ${t} COMMAND ${t})
   endforeach()
+  # The two-way link test as a regression test: two real nodes, a modelled room at 35 dB SNR, a unique
+  # payload with its SHA-256 in each direction. It fails unless BOTH directions verify, which is what the
+  # task asks the link test to prove - and it is fast (about two seconds of device time).
+  if(TARGET ni)
+    add_test(NAME t_linktest
+             COMMAND ni linktest --profile 2 --snr 35 --bytes 30 --budget-ms 60000)
+  endif()
 endif()

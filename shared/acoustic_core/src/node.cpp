@@ -1,5 +1,7 @@
 // node.cpp — the whole engine for one device. Every platform shell (Android service, Windows
 // app, CLI, simulator, WASM) drives exactly these methods.
+#include <chrono>
+
 #include "ni/node.h"
 #include <math.h>
 #include <sstream>
@@ -305,11 +307,31 @@ void Node::on_delivered(const Delivered& d) {
       lt_in_.got_sha = ni_hex(got, 32);
       lt_in_.hash_ok = memcmp(want, got, 32) == 0;
       lt_in_.answered = true;
-      uint8_t rep[40];
+      // The reply carries three things now: the hash this end computed over the far end's payload, the
+      // length, and a payload of this end's own - a fresh random nonce and its SHA-256. The first two
+      // prove the forward direction; the nonce proves the reverse direction with content the initiator
+      // has never seen, so "both directions work" is a measured statement rather than an inference from
+      // an empty acknowledgement. (A verdict-only reply could be a valid answer whose own bytes were
+      // mangled; this cannot.)
+      uint8_t rep[88];
+      memset(rep, 0, sizeof rep);
       memcpy(rep, got, 32);
       ni_wr32(rep + 32, (uint32_t)blen);
       rep[36] = lt_in_.hash_ok ? 1 : 0;
-      send_bytes((uint16_t)(kTestStream + kRespBase), NI_MSG_FILE, rep, 37, 0);
+      Rng rr((uint64_t)(now_ms * 2654435761u) ^ 0x9e3779b9u);
+      rr.bytes(rep + 37, kRevNonce);
+      uint8_t rsh[32];
+      ni_sha256(rep + 37, kRevNonce, rsh);
+      memcpy(rep + 37 + kRevNonce, rsh, 32);
+      send_bytes((uint16_t)(kTestStream + kRespBase), NI_MSG_FILE, rep, 37 + kRevNonce + 32, 0);
+      // The responder's own view of the forward leg, so a failed comparison can be told apart from a
+      // short or padded delivery without guessing (this is what the command prints when the test fails).
+      std::ostringstream ro;
+      ro << "{\"role\": \"responder\", \"payload_bytes\": " << blen
+         << ", \"hash_match\": " << (lt_in_.hash_ok ? "true" : "false")
+         << ", \"expect_sha256\": \"" << lt_in_.expect_sha << "\", \"got_sha256\": \""
+         << lt_in_.got_sha << "\"}";
+      test_report = ro.str();
     }
     return;
   }
@@ -317,10 +339,27 @@ void Node::on_delivered(const Delivered& d) {
     if (d.data.size() >= 37 && lt_.pending) {
       lt_.t1 = now_ms;
       lt_.answered = true;
-      lt_.got_sha.assign((const char*)d.data.data(), 32);
+      // Hex, not the raw bytes: the check below compares this with expect_sha, which is hex. Assigning
+      // the 32 raw bytes here made the comparison impossible to satisfy, so the link test reported
+      // hash_match false even when the payload had crossed the air perfectly and the far end had
+      // confirmed it. Every "the forward leg failed" reading this command ever produced was that one
+      // line. (Defect 66. `reverse_hash_match` was computed with memcmp and stayed correct, which is why
+      // the return leg verified and the forward leg "did not".)
+      lt_.got_sha = ni_hex(d.data.data(), 32);
       lt_.hash_ok = d.data[36] != 0 && lt_.got_sha == lt_.expect_sha;
       lt_.bytes = ni_rd32(&d.data[32]);
       lt_.pending = false;
+      // the reverse leg: the far end's own nonce and the hash it claims for it. Recomputed here, so a
+      // corrupted return trip cannot pass by repeating a hash.
+      if (d.data.size() >= 37 + kRevNonce + 32) {
+        uint8_t want_r[32];
+        memcpy(want_r, d.data.data() + 37 + kRevNonce, 32);
+        uint8_t got_r[32];
+        ni_sha256(d.data.data() + 37, kRevNonce, got_r);
+        lt_.reverse_bytes = kRevNonce;
+        lt_.reverse_sha = ni_hex(got_r, 32);
+        lt_.reverse_ok = memcmp(want_r, got_r, 32) == 0;
+      }
     }
     return;
   }
@@ -356,39 +395,82 @@ int Node::selftest(int payload_bytes, uint64_t seed, PhyTestResult* out) {
 }
 
 // ------------------------------------------------------------------ link test (real peer)
-int Node::test_link(int64_t now, int payload_bytes, std::string* report) {
+// Split into start / poll / report because the blocking form can only work for a caller that keeps
+// moving audio between the two ends *while* the test runs. The first version's internal loop called
+// step() on this node alone, so in the two-node harness the test could never be answered: it burned its
+// whole timeout and reported "not answered" no matter how healthy the link was. A GUI has the same
+// problem for a different reason - it must not freeze for the length of a link test.
+int Node::start_link_test(int64_t now, int payload_bytes) {
   int rc = ensure_built();
   if (rc != NI_OK) return rc;
   if (!running_) return NI_ERR_STATE;
   if (payload_bytes > link_->max_payload() - 40) payload_bytes = link_->max_payload() - 40;
-  Rng r((uint64_t)time(nullptr) ^ 0x2b5u);
-  std::vector<uint8_t> body((size_t)payload_bytes);
-  r.bytes(&body[0], body.size());
+  if (payload_bytes < 8) payload_bytes = link_->max_payload() - 40;
+  // A payload that is unique per run, which is the point of the test: three runs inside the same second
+  // used to be seeded from time() alone and therefore tested byte-identical payloads against identical
+  // hashes. The seed now mixes the wall clock, a high-resolution tick and a per-process address so two
+  // runs cannot share it by accident.
+  static uint64_t counter = 0;
+  const uint64_t tick =
+      (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::high_resolution_clock::now().time_since_epoch())
+          .count();
+  const uint64_t addr = (uint64_t)(uintptr_t)this;
+  Rng r((uint64_t)time(nullptr) ^ (tick * 0x9e3779b97f4a7c15ull) ^ (addr << 17) ^ (++counter * 0x2b5u));
+  lt_body_.assign((size_t)payload_bytes, 0);
+  r.bytes(&lt_body_[0], lt_body_.size());
   uint8_t sh[32];
-  ni_sha256(&body[0], body.size(), sh);
+  ni_sha256(&lt_body_[0], lt_body_.size(), sh);
   std::vector<uint8_t> msg;
   msg.insert(msg.end(), sh, sh + 32);
-  msg.insert(msg.end(), body.begin(), body.end());
+  msg.insert(msg.end(), lt_body_.begin(), lt_body_.end());
   lt_.pending = true;
   lt_.answered = false;
   lt_.hash_ok = false;
+  lt_.reverse_ok = false;
+  lt_.reverse_bytes = 0;
+  lt_.reverse_sha.clear();
+  lt_.got_sha.clear();
+  lt_.bytes = 0;
   lt_.t0 = now;
   lt_.expect_sha = ni_hex(sh, 32);
-  link_->arq().send_message(kTestStream, NI_MSG_FILE, msg.data(), msg.size(), 0);
-  // pump until answered or timeout; the caller's transport must also be moving PCM here, so
-  // this helper is only used by the tests/CLI that drive both endpoints themselves.
+  return link_->arq().send_message(kTestStream, NI_MSG_FILE, msg.data(), msg.size(), 0);
+}
+
+bool Node::link_test_finished() const { return lt_.answered; }
+
+std::string Node::link_test_report(int64_t waited) const {
+  std::ostringstream o;
+  o << "{\"payload_bytes\": " << lt_body_.size() << ", \"answered\": "
+    << (lt_.answered ? "true" : "false")
+    << ", \"hash_match\": " << (lt_.hash_ok ? "true" : "false")
+    << ", \"reverse_payload_bytes\": " << lt_.reverse_bytes
+    << ", \"reverse_hash_match\": " << (lt_.reverse_ok ? "true" : "false")
+    << ", \"reverse_sha256\": \"" << lt_.reverse_sha << "\""
+    << ", \"directions_verified\": " << ((lt_.hash_ok && lt_.reverse_ok) ? 2 : (lt_.hash_ok ? 1 : 0))
+    << ", \"elapsed_ms\": " << waited
+    << ", \"expect_sha256\": \"" << lt_.expect_sha << "\", \"got_sha256\": \"" << lt_.got_sha
+    << "\"}";
+  return o.str();
+}
+
+int Node::test_link(int64_t now, int payload_bytes, std::string* report) {
+  int rc = start_link_test(now, payload_bytes);
+  if (rc != NI_OK) return rc;
+  // Pump until answered or timeout. The caller's transport must also be moving PCM between the two
+  // ends here - that is the whole point of the split API above, and it is why cmd_linktest() drives the
+  // pump itself instead of calling this.
   int waited = 0;
   while (!lt_.answered && waited < cfg_.arq_wait_ms) {
     step(now + waited);
     waited += 10;
   }
-  std::ostringstream o;
-  o << "{\"payload_bytes\": " << payload_bytes << ", \"answered\": " << (lt_.answered ? "true" : "false")
-    << ", \"hash_match\": " << (lt_.hash_ok ? "true" : "false") << ", \"elapsed_ms\": " << waited
-    << ", \"expect_sha256\": \"" << lt_.expect_sha << "\", \"got_sha256\": \"" << lt_.got_sha << "\"}";
-  *report = o.str();
-  if (report) test_report = *report;
-  return lt_.answered && lt_.hash_ok ? NI_OK : NI_ERR_TIMEOUT;
+  if (report) *report = link_test_report(waited);
+  test_report = link_test_report(waited);
+  // Success means BOTH directions, each verified against content that crossed the air: the payload this
+  // end sent, and the far end's own nonce that came back. A run that only got the forward leg is a
+  // failure, and the JSON says which leg failed.
+  return (lt_.answered && lt_.hash_ok && lt_.reverse_ok) ? NI_OK : NI_ERR_TIMEOUT;
 }
 
 // ------------------------------------------------------------------ calibration
