@@ -533,15 +533,17 @@ static std::string status_advice(const StatusSnapshot& s) {
          "is in the path.";
     return o.str();
   }
-  if (!s.peer_online && s.frames_received > 0) {
-    // No peer has ever answered, yet frames are decoding - and every node hears its own speaker in a
-    // room (half duplex deliberately does not cancel it). So the only thing these frames can be is our
-    // own transmission coming back through the microphone.
-    o << "this machine is decoding its own transmissions (" << s.frames_received
-      << " frames) while no other device has answered: the speaker, the microphone and the modem all " \
-         "work on THIS end. What is not working is the other device reaching this one - check that it " \
-         "is started, that it is transmitting (a receiver is silent until it hears something), and " \
-         "that both ends show the same profile and session id.";
+  // Self-echo is a measured fact now, not an inference: the link compares every burst it decodes with
+  // the bursts this device put on the air and drops the ones that are its own voice. So this branch
+  // fires on evidence, and frames_received no longer contains echoes (defect 59).
+  if (s.self_echo_bursts > 0 && !s.peer_online) {
+    o << "the microphone decoded " << s.self_echo_bursts
+      << " burst(s) that were this device's OWN transmission coming back (self-echo), and no burst " \
+         "from any other device. Speaker, microphone, profile and modem all work on THIS end - the " \
+         "proof is that it hears itself clearly enough to decode itself. What has not happened is the " \
+         "other device being heard at all: check that it is started, that it is transmitting (a " \
+         "receiver is silent until it hears something), that it uses the SAME profile number and " \
+         "session id, and that its speaker actually faces this microphone.";
     return o.str();
   }
   if (s.frames_received == 0) {
@@ -635,6 +637,7 @@ StatusSnapshot Node::snapshot() const {
     s.peer_seen_ms = link_->peer_seen_ms();
     s.frames_sent = a.tx_frames;
     s.frames_received = a.rx_frames;
+    s.self_echo_bursts = link_->counters().self_echo;
     s.bytes_sent = a.tx_bytes_payload;
     s.bytes_received = a.rx_bytes_payload;
     s.retries = a.tx_retries;
@@ -708,6 +711,7 @@ std::string StatusSnapshot::to_json() const {
     << ", \"loss_pct\": " << loss_pct << ", \"rtt_ms\": " << rtt_ms << ", \"erle_db\": " << erle_db
     << ", \"bytes_sent\": " << bytes_sent << ", \"bytes_received\": " << bytes_received
     << ", \"frames_sent\": " << frames_sent << ", \"frames_received\": " << frames_received
+    << ", \"self_echo_bursts\": " << self_echo_bursts
     << ", \"retransmits\": " << retries << ", \"crc_fail\": " << crc_fail << ", \"mtu\": " << mtu
     << ", \"tunnel_up\": " << (tunnel_up ? "true" : "false") << ", \"tunnel_detail\": \"" << tunnel_detail
     << "\", \"internet_ok\": " << (internet_ok ? "true" : "false") << ", \"internet_detail\": \""

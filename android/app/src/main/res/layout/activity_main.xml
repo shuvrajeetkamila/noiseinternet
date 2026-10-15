@@ -76,9 +76,12 @@
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Session id (both ends must match)" />
 
+        <!-- 7, not 0: the engine's own default, the PC window's default and this field's fallback all
+             have to be the same number, or a user who types nothing gets two ends that cannot pair
+             (defect 43, and this field was still 0). -->
         <EditText android:id="@+id/session_id"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:inputType="number" android:text="0" />
+            android:inputType="number" android:text="7" />
 
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Pairing passphrase (short ones are weak: the core prints the entropy)" />
@@ -90,6 +93,13 @@
         <CheckBox android:id="@+id/duplex"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Full duplex (FDD + echo cancellation - experimental, never tested on hardware)" />
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Proxy token (receiver side; blank = the engine generates one)" />
+
+        <EditText android:id="@+id/proxy_token"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="textPassword" />
 
         <CheckBox android:id="@+id/tunnel"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
@@ -129,8 +139,23 @@
                 android:layout_height="wrap_content" android:text="Internet test" />
         </LinearLayout>
 
-        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Measured reports" android:textStyle="bold" android:paddingTop="12dp" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="12dp">
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Measured reports" android:textStyle="bold"
+                android:layout_gravity="center_vertical" />
+
+            <!-- Copy the whole report: this panel is the thing a user pastes into a message, and it is
+                 plain text, so the clipboard is all it needs. Long-press works too (the view is
+                 selectable) but nobody should have to discover that. -->
+            <Button android:id="@+id/copy_report" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:layout_marginStart="12dp"
+                android:text="Copy report" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/results"

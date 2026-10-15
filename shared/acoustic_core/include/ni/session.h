@@ -328,7 +328,32 @@ class AcousticLink {
     //                                    end, or the level is too high/low)
     //   sync_hits == 0, rx_no_frame    -> the receiver hears no burst at all (route, volume, mic)
     uint64_t sync_hits = 0;
+    // Bursts this device decoded that turned out to be ITS OWN transmission arriving back through its
+    // own speaker-to-microphone path. They are not a peer, they must not move the pairing state, and
+    // they used to be counted as received frames: the phone reported "decoded 48" with "bytes received
+    // 0" because 48 of the 48 were the device hearing itself. (Defect 59.)
+    uint64_t self_echo = 0;
   };
+  // The last few burst PDUs this device put on the air, newest last. An echo of our own transmission
+  // decodes to the bytes we sent, so an incoming PDU that matches one of these (within
+  // NI_SELF_ECHO_WINDOW_MS) is this device hearing itself - an exact test, unlike a timing guess that
+  // would have to decide whether a fast peer answered or the room did. The ring is what makes the
+  // distinction possible at all before pairing, when there is no key to validate against.
+  // Two hashes per slot: the bytes as transmitted (with the 2-byte burst-length prefix) and the bytes
+  // the *receiver* sees, because the decoder strips that prefix before the ARQ ever sees the PDU.
+  // Comparing only the transmitted form is why the first version of this detector never fired.
+  struct TxEcho { uint64_t hash = 0, hash_body = 0; int64_t ms = 0; size_t n = 0; };
+  // 32 slots, not a handful: the detector has to survive a transmitter that gets chatty (a master polls
+  // every 1.5 s and retries on top of that) and a capture buffer that holds 1.2 s of the past, so the
+  // ring must span several seconds of transmissions or the echo of an older burst falls off the end and
+  // is believed as a peer. 32 x 32 bytes is nothing.
+  static const int kTxEchoRing = 32;
+  // How long a burst we sent stays eligible to be recognised coming back. Long enough for a retransmit
+  // of the same PDU (a retry re-sends identical bytes, so the match stays valid), short enough that the
+  // ring never holds something the room could plausibly still be returning.
+  static const int64_t NI_SELF_ECHO_WINDOW_MS = 15000;
+  bool is_own_echo(const uint8_t* pdu, size_t n, int64_t now) const;
+
   // UI hooks
   std::function<void(const PhyStats&)> on_stats_;
   std::function<void(const RxResult&)> on_phy_;
@@ -375,6 +400,8 @@ class AcousticLink {
   bool running_ = false;
   std::string last_error_;
   int64_t listen_until_ms_ = 0, last_tx_end_ms_ = 0, peer_seen_ms_ = 0, last_peer_burst_ms_ = 0;
+  TxEcho tx_echo_[kTxEchoRing];
+  int tx_echo_next_ = 0;
   int pending_profile_ = -1;            // requested, waiting for the peer's ack (see apply_profile)
   int64_t pending_profile_ms_ = 0;
   int64_t tx_backlog_ = 0;  // samples the transport still owes the speaker (set_tx_backlog)

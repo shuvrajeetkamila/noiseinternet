@@ -90,6 +90,12 @@ struct StatusSnapshot {
   double link_bps = 0, useful_bps_up = 0, useful_bps_down = 0;
   double loss_pct = 0, rtt_ms = 0, erle_db = 0;
   uint64_t bytes_sent = 0, bytes_received = 0, frames_sent = 0, frames_received = 0;
+  // Bursts this device decoded that were its own transmission returning through its own microphone.
+  // Counted separately since defect 59: adding them to frames_received made "decoded 48, bytes
+  // received 0" look like a peer that answers but never delivers, when in fact no peer had ever been
+  // heard. They also no longer make the peer look online, because the link drops them before the ARQ
+  // can see them.
+  uint64_t self_echo_bursts = 0;
   uint64_t retries = 0, crc_fail = 0, malformed = 0;
   bool tunnel_up = false, internet_ok = false;
   std::string tunnel_detail, internet_detail;

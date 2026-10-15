@@ -42,7 +42,7 @@ namespace {
 enum {
   IDC_GIVER = 1000, IDC_RECEIVER, IDC_MIC, IDC_SPK, IDC_PROFILE, IDC_SESSION, IDC_SECRET,
   IDC_MATCH, IDC_DUPLEX, IDC_PROXY, IDC_START, IDC_STOP, IDC_SWITCH, IDC_CAL, IDC_LINK, IDC_NET,
-  IDC_REC,
+  IDC_REC, IDC_COPY_STATUS, IDC_COPY_LOG, IDC_TOKEN, IDC_SHOW_TOKEN,
   IDC_STATUS, IDC_LOG, TIMER_REFRESH = 1
 };
 
@@ -118,6 +118,69 @@ LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
 // EnumChildWindows wants a WNDENUMPROC: a capture-less lambda happens to convert on x64, but the
 // calling convention a lambda ends up with is not something this code should be betting on, so the
 // control-dump visitor is an ordinary function.
+// Copy what a result pane says, because the first thing anyone does with a measurement is paste it
+// somewhere - a bug report, an email, this conversation. Returns the number of characters copied, or -1.
+int copy_text_to_clipboard(HWND owner, const std::wstring& text) {
+  if (text.empty()) return -1;
+  if (!OpenClipboard(owner)) return -1;
+  EmptyClipboard();
+  int copied = -1;
+  const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+  HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (h) {
+    void* dst = GlobalLock(h);
+    if (dst) {
+      memcpy(dst, text.c_str(), bytes);
+      GlobalUnlock(h);
+      if (SetClipboardData(CF_UNICODETEXT, h)) copied = (int)text.size();
+      else GlobalFree(h);
+    } else {
+      GlobalFree(h);
+    }
+  }
+  CloseClipboard();
+  return copied;
+}
+
+std::wstring edit_text(HWND h) {
+  int n = GetWindowTextLengthW(h);
+  std::wstring out((size_t)(n > 0 ? n : 0) + 1, L'\0');
+  int got = GetWindowTextW(h, &out[0], (int)out.size());
+  out.resize((size_t)(got > 0 ? got : 0));
+  return out;
+}
+
+// The layout audit's visitor. Like child_dump below, it is an ordinary function because the calling
+// convention a lambda gets in an EnumChildWindows callback is not something this code bets on.
+struct LayoutItem {
+  std::wstring what;
+  RECT rc;
+};
+struct LayoutDump {
+  HWND win;
+  std::vector<LayoutItem>* out;
+};
+BOOL CALLBACK layout_dump(HWND h, LPARAM l) {
+  LayoutDump* c = reinterpret_cast<LayoutDump*>(l);
+  RECT r;
+  GetWindowRect(h, &r);
+  // window rects are in screen coordinates; the client-area test only makes sense in the window's own
+  MapWindowPoints(HWND_DESKTOP, c->win, (LPPOINT)&r, 2);
+  wchar_t cls[64] = L"", txt[128] = L"";
+  GetClassNameW(h, cls, 63);
+  SendMessageW(h, WM_GETTEXT, 127, (LPARAM)txt);
+  if (wcscmp(cls, L"ComboBox") == 0) {
+    // a combo box's window rect includes its drop-down list, which by design covers half the form
+    int item = (int)SendMessageW(h, CB_GETITEMHEIGHT, 0, 0);
+    if (item > 0) r.bottom = r.top + item + 8;   // closed height
+  }
+  LayoutItem it;
+  it.what = std::wstring(cls) + L" \"" + txt + L"\"";
+  it.rc = r;
+  c->out->push_back(it);
+  return TRUE;
+}
+
 struct ChildDump {
   Trace* t;
   int count;
@@ -157,6 +220,7 @@ struct App {
   std::vector<std::wstring> pending;              // log lines to flush into the edit
   std::mutex pending_mu;
   std::wstring last_match;                        // so a changed match code gets logged once
+  HWND token = nullptr, token_show = nullptr;     // receiver-side proxy token (defect 27)
   unsigned cfg_proxy_port_ = 8471;                // the port this session's proxy was started on
 
   // Log lines are produced on any thread and applied on the UI thread, which is the only way to keep a
@@ -435,6 +499,25 @@ struct App {
     cfg.enable_giver_fetch = (cfg.role == NI_ROLE_GIVER);
     cfg.proxy_port = 8471;
     cfg_proxy_port_ = (unsigned)cfg.proxy_port;
+    // Defect 27: the window could show the generated token but never let the user choose one, so the
+    // documented receiver workflow ("point your browser at 127.0.0.1:8471 with this token") could not
+    // be set up from the GUI at all. Now the field is read here, checked before anything is opened, and
+    // handed to the same NodeConfig the console's --proxy-token feeds.
+    {
+      std::string tok = edit_u8(token);
+      if (!tok.empty() && tok.size() < 8) {
+        std::wstring m = fmt(L"The proxy token is %d characters long. Either leave the field empty - the "
+                             L"engine then generates a 16-character token and the status panel shows it - "
+                             L"or give at least 8 characters.\n\nNothing has been started.",
+                             (int)tok.size());
+        say(L"refused to start: " + m);
+        SetFocus(token);
+        MessageBoxW(win, m.c_str(), L"Noise Internet - proxy token too short", MB_OK | MB_ICONWARNING);
+        return false;
+      }
+      cfg.proxy_token = tok;
+      if (!tok.empty()) say(L"proxy token: the one typed in the field will be used (not logged here).");
+    }
     // Assist: on for the window, because this is the build a person runs in a room with no meter and no
     // protocol knowledge. It sweeps our own output level while unpaired and lets a receiver beacon, so
     // that "nothing happens and nothing says why" cannot be the user's whole experience.
@@ -565,11 +648,25 @@ struct App {
     // browser at this proxy. (The console build can set one with --proxy-token; the window generated it
     // and, until this line, never told anyone what it was. Defect 27 for the Android side.)
     if (node && s.tunnel_up && !node->proxy_token().empty()) {
-      t += fmt(L"proxy 127.0.0.1:%u  token %hs\r\n", (unsigned)cfg_proxy_port_,
-               node->proxy_token().c_str());
+      // Masked unless the user asks to see it. A bearer token in a pane that gets photographed and
+      // pasted is a token that leaks; a token the user cannot read is a proxy nobody can use. Hence the
+      // checkbox, and never the log box (which is the pane people paste).
+      bool show = SendMessageW(token_show, BM_GETCHECK, 0, 0) == BST_CHECKED;
+      if (show)
+        t += fmt(L"proxy 127.0.0.1:%u  token %hs\r\n", (unsigned)cfg_proxy_port_,
+                 node->proxy_token().c_str());
+      else
+        t += fmt(L"proxy 127.0.0.1:%u  token = hidden (tick \"show\" to read it)   [%d characters]\r\n",
+                 (unsigned)cfg_proxy_port_, (int)node->proxy_token().size());
       t += L"  anything that wants to use this proxy needs that token "
            L"(Proxy-Authorization: Noise <token>).\r\n";
     }
+    // The device's own voice, counted by the engine as such instead of as a peer's frames. A lone window
+    // reporting "recv 48" without this number reads like a peer that answers and delivers nothing; with
+    // it, it reads like a device listening to itself, which is what it was (defect 59).
+    t += fmt(L"self-echo bursts    : %llu  (of the frames above, this many were this device hearing "
+             L"itself - not a peer)\r\n",
+             (unsigned long long)s.self_echo_bursts);
     t += fmt(L"internet %hs: %hs\r\n", s.internet_ok ? "verified" : "not verified", s.internet_detail.c_str());
     // The one-line answer to "why isn't it pairing", from the engine's own counters. Every branch
     // names the number it is based on, and when the numbers are fine it says so instead of guessing.
@@ -631,12 +728,51 @@ struct App {
     g_trace.line(fmt(L"modulation profiles offered: %d", (int)profile_ids.size()));
     g_trace.line(L"no audio was opened and nothing was transmitted by this run: --ui-check is not a link "
                  L"test and proves nothing about sound in air.");
-    ok_ui_check = (ctx.count >= 14);
-    g_trace.line(ok_ui_check ? L"step 3: ui-check PASSED (window, controls and inventory all produced)"
-                             : L"step 3: ui-check FAILED - fewer controls than the window defines");
+    // Layout audit. Counting controls proved they were created; it could not see that the record button
+    // was drawn 8 px into the "measured status" label, because a control that is created but covered is
+    // still a created control. Two things are checked for every child: it lies inside the client area,
+    // and no two of them overlap. Combo boxes are measured at their closed height (their window rect
+    // includes the drop-down list, which would otherwise "overlap" half the form by design).
+    {
+      RECT client;
+      GetClientRect(win, &client);
+      std::vector<LayoutItem> rs;
+      LayoutDump collect{win, &rs};
+      EnumChildWindows(win, layout_dump, (LPARAM)&collect);
+      int outside = 0, overlaps = 0;
+      for (size_t i = 0; i < rs.size(); ++i) {
+        const RECT& a = rs[i].rc;
+        if (a.left < client.left || a.top < client.top || a.right > client.right ||
+            a.bottom > client.bottom) {
+          ++outside;
+          g_trace.line(fmt(L"layout: OUTSIDE the client area: %ls at %d,%d %dx%d", rs[i].what.c_str(),
+                           (int)a.left, (int)a.top, (int)(a.right - a.left), (int)(a.bottom - a.top)));
+        }
+      }
+      for (size_t i = 0; i < rs.size(); ++i)
+        for (size_t j = i + 1; j < rs.size(); ++j) {
+          RECT x;
+          if (IntersectRect(&x, &rs[i].rc, &rs[j].rc)) {
+            ++overlaps;
+            g_trace.line(fmt(L"layout: OVERLAP between %ls and %ls (%dx%d at %d,%d)",
+                             rs[i].what.c_str(), rs[j].what.c_str(), (int)(x.right - x.left),
+                             (int)(x.bottom - x.top), (int)x.left, (int)x.top));
+          }
+        }
+      g_trace.line(fmt(L"layout audit: %d controls, %d outside the client area, %d overlapping pairs",
+                       (int)rs.size(), outside, overlaps));
+      layout_ok = (outside == 0 && overlaps == 0);
+    }
+    ok_ui_check = (ctx.count >= 14) && layout_ok;
+    g_trace.line(ok_ui_check
+                     ? L"step 3: ui-check PASSED (window, controls, layout audit and inventory all good)"
+                     : L"step 3: ui-check FAILED - fewer controls than the window defines, or a layout "
+                       L"problem (see the layout lines above; the packaging step refuses to publish when "
+                       L"this fails)");
     g_trace.close();
   }
   bool ok_ui_check = false;
+  bool layout_ok = true;   // set by the audit in ui_check(): no control outside the client area, no overlap
 };
 
 App* g_app = nullptr;
@@ -675,7 +811,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       mk(hwnd, L"STATIC", L"session id (same on both ends)", 0, 304, 108, 150, 16, a->font, 0);
       a->session = mk(hwnd, L"EDIT", L"7", ES_NUMBER | WS_BORDER, 304, 126, 60, 22, a->font, IDC_SESSION);
       mk(hwnd, L"STATIC", L"passphrase (same on both ends)", 0, 374, 108, 210, 16, a->font, 0);
-      a->secret = mk(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER, 374, 126, 210, 22, a->font, IDC_SECRET);
+      // ES_PASSWORD, at last: the pairing passphrase is a shared secret and this field used to print it
+      // in clear text on a screen that gets photographed. It is masked by default and the user can reveal
+      // it deliberately with the "show" box below (the same box also reveals the proxy token).
+      a->secret = mk(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER, 374, 126, 210, 22,
+                     a->font, IDC_SECRET);
       mk(hwnd, L"STATIC", L"match code - must read identically on both ends once paired", 0, 16, 158, 380, 16,
          a->font, 0);
       a->match = mk(hwnd, L"EDIT", L"(not paired)", ES_READONLY | WS_BORDER, 400, 154, 184, 26, a->big, IDC_MATCH);
@@ -691,14 +831,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       mk(hwnd, L"BUTTON", L"Internet test", BS_PUSHBUTTON, 474, 214, 110, 26, a->font, IDC_NET);
       // The one button that answers "what is my microphone actually recording?" - the question that
       // three field reports could not answer, and the only one that needs no second device.
-      mk(hwnd, L"BUTTON", L"Record 8 s and analyse what the microphone hears", BS_PUSHBUTTON, 16, 240,
-         568, 24, a->font, IDC_REC);
-      mk(hwnd, L"STATIC", L"measured status", 0, 16, 248, 200, 16, a->font, 0);
+      // Row 7. The record button used to be drawn at y=240 with the "measured status" label at y=248 on
+      // top of it - a real overlap, invisible to a check that only counted controls, and exactly what
+      // --ui-check now refuses to let through (see the layout audit at the end of ui_check()).
+      mk(hwnd, L"BUTTON", L"Record 8 s and analyse what the microphone hears", BS_PUSHBUTTON, 16, 244,
+         380, 24, a->font, IDC_REC);
+      mk(hwnd, L"BUTTON", L"Copy status", BS_PUSHBUTTON, 400, 244, 92, 24, a->font, IDC_COPY_STATUS);
+      mk(hwnd, L"BUTTON", L"Copy log", BS_PUSHBUTTON, 496, 244, 88, 24, a->font, IDC_COPY_LOG);
+      // Row 8: the receiver's proxy token. Blank means the engine generates one and shows it when
+      // "show" is ticked; typing one means the user decides it. Masked unless asked (defect 27).
+      mk(hwnd, L"STATIC", L"proxy token (receiver side; blank = the engine generates one)", 0, 16, 278, 260,
+         16, a->font, 0);
+      a->token = mk(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_BORDER, 280, 274, 224, 22,
+                    a->font, IDC_TOKEN);
+      a->token_show = mk(hwnd, L"BUTTON", L"show secrets", BS_AUTOCHECKBOX, 508, 276, 92, 18, a->font,
+                         IDC_SHOW_TOKEN);
+      mk(hwnd, L"STATIC", L"measured status", 0, 16, 306, 200, 16, a->font, 0);
       a->status = mk(hwnd, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER,
-                     16, 266, 568, 150, a->mono, IDC_STATUS);
-      mk(hwnd, L"STATIC", L"what the engine said", 0, 16, 424, 200, 16, a->font, 0);
+                     16, 324, 568, 150, a->mono, IDC_STATUS);
+      mk(hwnd, L"STATIC", L"what the engine said", 0, 16, 482, 200, 16, a->font, 0);
       a->log = mk(hwnd, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 16,
-                  442, 568, 128, a->mono, IDC_LOG);
+                  500, 568, 128, a->mono, IDC_LOG);
 
       // Profiles, an empty device list and the defaults, so the window is usable the moment it appears.
       // The endpoints are read by load_devices() AFTER CreateWindowExW returns: a COM failure inside
@@ -731,6 +884,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
       int id = LOWORD(wp);
       switch (id) {
+        case IDC_COPY_STATUS: {
+          std::wstring text = edit_text(a->status);
+          int n = copy_text_to_clipboard(a->win, text);
+          // One line in the log, never the pane's contents: the log is what the user pastes, and the
+          // status pane can contain a proxy token.
+          a->say(n >= 0 ? fmt(L"copied the status panel (%d characters) to the clipboard", n)
+                        : L"nothing to copy yet - the status panel is empty.");
+          break;
+        }
+        case IDC_COPY_LOG: {
+          std::wstring text = edit_text(a->log);
+          int n = copy_text_to_clipboard(a->win, text);
+          a->say(n >= 0 ? fmt(L"copied the engine log (%d characters) to the clipboard", n)
+                        : L"nothing to copy yet - the engine log is empty.");
+          break;
+        }
+        case IDC_SHOW_TOKEN: {
+          // Both secrets, not just the token. The passphrase has to be read and compared on the two
+          // screens ("both ends must use the same passphrase"), so a box that reveals one and hides the
+          // other is no use - and both stay masked until it is ticked, because a photograph of this
+          // window should not carry either of them.
+          bool show = SendMessageW(a->token_show, BM_GETCHECK, 0, 0) == BST_CHECKED;
+          const WPARAM mask = show ? 0 : (WPARAM)L'\u25CF';
+          SendMessageW(a->token, EM_SETPASSWORDCHAR, mask, 0);
+          SendMessageW(a->secret, EM_SETPASSWORDCHAR, mask, 0);
+          InvalidateRect(a->token, nullptr, TRUE);    // the change is not repainted without this
+          InvalidateRect(a->secret, nullptr, TRUE);
+          a->say(show ? L"secrets visible: the passphrase field is unmasked and the status panel will "
+                        L"print the proxy token while this is ticked"
+                      : L"secrets hidden again");
+          break;
+        }
         case IDC_START: a->start(); break;
         case IDC_STOP: a->stop_from_ui(); break;
         case IDC_SWITCH: {
@@ -813,7 +998,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
   wc.lpszClassName = L"NoiseInternetGui";
   RegisterClassExW(&wc);
-  RECT r = {0, 0, 600, 584};
+  RECT r = {0, 0, 620, 660};   // the client area the controls above are laid out for
   AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
   HWND hwnd = CreateWindowExW(0, wc.lpszClassName,
                               L"Noise Internet - acoustic link (nothing measured over air yet)",

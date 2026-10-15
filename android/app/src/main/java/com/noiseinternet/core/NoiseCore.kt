@@ -134,6 +134,10 @@ class NoiseCore(config: Config) {
         val usefulBpsDown: Double?,
         val framesSent: Long?,
         val framesReceived: Long?,
+        // Bursts this device decoded that were its own transmission coming back through its own
+        // microphone (defect 59). Shown separately, because a lone phone reporting "decoded 48" with
+        // "bytes received 0" was really this number all along.
+        val selfEchoBursts: Long?,
         val retries: Long?,
         val crcFail: Long?,
         val bytesSent: Long?,
@@ -165,7 +169,7 @@ class NoiseCore(config: Config) {
                         state = "unparsable", role = "-", profile = "-", sampleRate = null,
                         peerOnline = false, snrDb = null, rssiDbfs = null, noiseDbfs = null,
                         evecPct = null, rttMs = null, lossPct = null, usefulBpsUp = null,
-                        usefulBpsDown = null, framesSent = null, framesReceived = null,
+                        usefulBpsDown = null, framesSent = null, framesReceived = null, selfEchoBursts = null,
                         retries = null, crcFail = null, bytesSent = null, bytesReceived = null,
                         mtu = null, tunnelUp = false, internetOk = false,
                         audioNote = "status JSON could not be parsed: ${e.message}", inDbfs = null,
@@ -200,6 +204,7 @@ class NoiseCore(config: Config) {
                     usefulBpsDown = d("useful_down_bps") ?: d("useful_bps_down"),
                     framesSent = l("frames_sent"),
                     framesReceived = l("frames_received"),
+                    selfEchoBursts = l("self_echo_bursts"),
                     retries = l("retransmits") ?: l("retries"),
                     crcFail = l("crc_fail"),
                     bytesSent = l("bytes_sent"),

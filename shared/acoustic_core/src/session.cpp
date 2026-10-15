@@ -272,7 +272,42 @@ int AcousticLink::feed_pcm(const float* x, size_t n) {
   return NI_OK;
 }
 
+// Is this burst the echo of something this device just sent? Exact byte comparison against the ring of
+// what went out, not a timing heuristic: a real peer cannot produce our PDU, and our own echo decodes to
+// exactly the bytes we rendered. The window is generous because a slow renderer can put a burst on the
+// air well after transmit() was called.
+// FNV-1a: a few lines, no allocation, and this only ever compares hashes of bursts this device itself
+// produced, so it does not need to be cryptographically anything.
+static uint64_t ni_hash64(const uint8_t* p, size_t n) {
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h ? h : 1;
+}
+
+bool AcousticLink::is_own_echo(const uint8_t* pdu, size_t n, int64_t now) const {
+  if (!n) return false;
+  const uint64_t h = ni_hash64(pdu, n);
+  for (int i = 0; i < kTxEchoRing; ++i) {
+    const TxEcho& e = tx_echo_[i];
+    if (!e.ms) continue;
+    // the same bytes as sent, or the same burst as the receiver sees it (without the length prefix)
+    const bool same = e.hash == h || (e.hash_body && e.hash_body == h);
+    const bool len_ok = (size_t)n == e.n || (size_t)n + NI_PDU_LEN_BYTES == e.n;
+    if (same && len_ok && now - e.ms >= 0 && now - e.ms <= NI_SELF_ECHO_WINDOW_MS) return true;
+  }
+  return false;
+}
+
 void AcousticLink::handle_pdu(const uint8_t* pdu, size_t n, const PhyStats& st, int64_t now) {
+  // Before the ARQ sees it, and before peer_seen_ms_ can be touched: this device's own voice.
+  if (is_own_echo(pdu, n, now)) {
+    c_.self_echo++;
+    last_error_ = "own transmission decoded back through the local microphone (self-echo)";
+    return;
+  }
   int accepted = arq_.on_pdu(pdu, n, now);
   if (accepted > 0) {
     peer_seen_ms_ = now;
@@ -341,6 +376,14 @@ void AcousticLink::transmit(const uint8_t* pdu, size_t n, int64_t now_ms) {
   pending_tx_frames_ = last_packed_frames_;
   tx_played_ms_ = (double)now_ms;
   c_.tx_bursts++;
+  // Remember what went out, so hearing it come back can be recognised as hearing ourselves rather than
+  // as the far end finally answering (defect 59).
+  tx_echo_[tx_echo_next_].hash = ni_hash64(pdu, n);
+  tx_echo_[tx_echo_next_].hash_body =
+      n > NI_PDU_LEN_BYTES ? ni_hash64(pdu + NI_PDU_LEN_BYTES, n - NI_PDU_LEN_BYTES) : 0;
+  tx_echo_[tx_echo_next_].ms = now_ms;
+  tx_echo_[tx_echo_next_].n = n;
+  tx_echo_next_ = (tx_echo_next_ + 1) % kTxEchoRing;
 }
 
 int AcousticLink::take_pcm(float* out, size_t cap) {
@@ -467,9 +510,10 @@ std::string AcousticLink::diagnostics_json() const {
     << ", \"adaptation\": \"" << last_adapt_reason_ << "\""
     << ", \"pairing\": \"" << (pair_ ? pair_->state_name() : "none") << "\""
     << (pair_ ? ", \"pairing_failures\": " + std::to_string((int)pair_->failures()) : "")
+    << ", \"self_echo_bursts\": " << c_.self_echo
     << ", \"counters\": {\"rx_bursts\": " << c_.rx_bursts << ", \"tx_bursts\": " << c_.tx_bursts
     << ", \"rx_crc_fail\": " << c_.rx_crc_fail << ", \"rx_no_frame\": " << c_.rx_no_frame
-    << ", \"tx_render_fail\": " << c_.tx_render_fail << "}"
+    << ", \"tx_render_fail\": " << c_.tx_render_fail << ", \"self_echo\": " << c_.self_echo << "}"
     << ", \"arq\": " << arq_.stats().to_json() << "}";
     ;
   return o.str();

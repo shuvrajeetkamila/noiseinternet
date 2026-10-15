@@ -41,6 +41,8 @@ jobs:
       - name: Unit tests (no audio hardware involved; these are the same targets ctest runs locally)
         working-directory: build-linux
         run: ctest --output-on-failure
+      - name: "Front-end parity (the two UIs must offer the same controls, both with a copy button)"
+        run: python3 scripts/check_frontend_parity.py
       - name: "Environment audit (prints the truth about this host: 0 audio devices)"
         run: ./build-linux/ni audit
       - name: One simulated-session transfer, so the published claim is reproducible from CI logs

@@ -44,6 +44,7 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
     private lateinit var outputSpinner: Spinner
     private lateinit var sessionEdit: EditText
     private lateinit var secretEdit: EditText
+    private lateinit var tokenEdit: EditText
     private lateinit var duplexBox: CheckBox
     private lateinit var tunnelBox: CheckBox
     private lateinit var roleGroup: RadioGroup
@@ -71,6 +72,7 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
         // the UI rather than as a silently mangled session id.
         sessionEdit.inputType = InputType.TYPE_CLASS_NUMBER
         secretEdit = findViewById(R.id.secret)
+        tokenEdit = findViewById(R.id.proxy_token)
         duplexBox = findViewById(R.id.duplex)
         tunnelBox = findViewById(R.id.tunnel)
         roleGroup = findViewById(R.id.role)
@@ -119,6 +121,19 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             runAsync("internet test") { it.internetTest("http://example.com/") }
         }
         findViewById<Button>(R.id.refresh).setOnClickListener { renderStatus() }
+        // Copy the report. The panes here are the only place the measurements exist, and a user with a
+        // phone cannot select-and-copy a TextView reliably; the button copies exactly what is shown.
+        findViewById<Button>(R.id.copy_report).setOnClickListener {
+            val text = results.text?.toString().orEmpty()
+            if (text.isBlank()) {
+                results.text = "nothing to copy yet - run a test or press Refresh first."
+            } else {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Noise Internet report", text))
+                // Say it in the pane itself: a toast disappears before some people finish reading it.
+                results.text = text + "\n\n[copied " + text.length + " characters to the clipboard]"
+            }
+        }
 
         askAudioPermission()
         window.decorView.post(refresh)
@@ -234,9 +249,13 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             )
             putExtra(NoiseService.EXTRA_PROFILE, pid)
             putExtra(NoiseService.EXTRA_SECRET, secret)
-            putExtra(NoiseService.EXTRA_SESSION, sessionEdit.text.toString().toIntOrNull() ?: 0)
+            putExtra(NoiseService.EXTRA_SESSION, sessionEdit.text.toString().toIntOrNull() ?: 7)
             putExtra(NoiseService.EXTRA_DUPLEX, duplexBox.isChecked)
             putExtra(NoiseService.EXTRA_TUNNEL, tunnelBox.isChecked)
+            // Defect 27 on the phone side: the receiver's proxy refuses any client without its bearer
+            // token, and until this field existed the phone's token could only be read out of a status
+            // line. Empty means the engine generates one.
+            putExtra(NoiseService.EXTRA_PROXY_TOKEN, tokenEdit.text.toString().trim())
             putExtra(NoiseService.EXTRA_INPUT, inputSpinner.selectedItemPosition - 1)
             putExtra(NoiseService.EXTRA_OUTPUT, outputSpinner.selectedItemPosition - 1)
         }
@@ -310,6 +329,10 @@ class MainActivity : Activity() {   // plain Activity: the app pulls in no Andro
             append("\ninput ").append(st.f(st.inDbfs)).append(" dBFS")
             append("  bursts seen ").append(st.n(st.syncHits))
             append("  decoded ").append(st.n(st.framesReceived))
+            // Its own voice, counted as such. Without this line "decoded 48, bytes received 0" reads
+            // like a peer that answers and delivers nothing; with it, it reads like a device listening to
+            // itself, which is what it is (defect 59).
+            append("  self-echo ").append(st.n(st.selfEchoBursts))
             st.txGain?.let { append("\nout level ").append(String.format("%.2f", it)).append(" of full scale") }
             append("  mtu ").append(st.n(st.mtu))
             append("\nSNR ").append(st.f(st.snrDb, "%.2f")).append(" dB")

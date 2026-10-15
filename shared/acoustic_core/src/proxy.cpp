@@ -236,33 +236,52 @@ int ReceiverGateway::handle_readable(ClientState& c, int64_t now_ms) {
           return NI_OK;
         }
         size_t used = 0;
-        ProxyRequest req;
-        if (!ProxyRequest::parse_head(c.rxbuf, &req, &used)) {
-          if (!req.error.empty()) {
-            abuse++;
-            reply_error(c, 400, req.error);
-            if (abuse > NI_PROXY_MAX_ABUSE) disabled_ = true;
+        if (c.phase == 0) {
+          ProxyRequest req;
+          if (!ProxyRequest::parse_head(c.rxbuf, &req, &used)) {
+            if (!req.error.empty()) {
+              abuse++;
+              reply_error(c, 400, req.error);
+              if (abuse > NI_PROXY_MAX_ABUSE) disabled_ = true;
+              return NI_OK;
+            }
+            return NI_OK;  // wait for more
+          }
+          c.req = req;
+          size_t clen = 0;
+          for (auto& kv : c.req.headers)
+            if (iequals(kv.first, "content-length"))
+              clen = (size_t)strtoul(kv.second.c_str(), nullptr, 10);
+          if (clen > NI_PROXY_MAX_BODY) {
+            reply_error(c, 413, "body too large for the acoustic link");
             return NI_OK;
           }
-          return NI_OK;  // wait for more
+          c.expect_body = clen;
+          // THE HEAD IS CONSUMED HERE. It used to stay in rxbuf, and the response handler - which
+          // appends the far end's answer to the same buffer and takes everything up to the first blank
+          // line as the response head - then found the client's own request there and sent that back as
+          // the answer: 101 bytes of GET, with the bearer token in them, and the real response discarded
+          // as "rest". From a browser that looks like a proxy that accepts the request and never answers
+          // it. (Defect 64. The t_proxy_auth check that reads the client's bytes caught it.)
+          c.rxbuf.erase(0, used);
+          c.body_so_far = c.rxbuf.size();
+          if (c.rxbuf.size() < clen) {
+            c.phase = 1;   // the rest of the body is still in flight
+            return NI_OK;
+          }
+          c.body = c.rxbuf.substr(0, clen);
+          c.rxbuf.clear();
+          c.phase = 2;
+        } else {
+          // phase 1: the head was parsed on an earlier read, so rxbuf holds body bytes only. Parsing it
+          // again as a request head - which is what the old single path did - fails on the first line and
+          // answers 400 to a perfectly good POST that was merely split across two reads. (Defect 65.)
+          c.body_so_far = c.rxbuf.size();
+          if (c.rxbuf.size() < c.expect_body) return NI_OK;
+          c.body = c.rxbuf.substr(0, c.expect_body);
+          c.rxbuf.clear();
+          c.phase = 2;
         }
-        c.req = req;
-        size_t clen = 0;
-        for (auto& kv : c.req.headers)
-          if (iequals(kv.first, "content-length")) clen = (size_t)strtoul(kv.second.c_str(), nullptr, 10);
-        if (clen > NI_PROXY_MAX_BODY) {
-          reply_error(c, 413, "body too large for the acoustic link");
-          return NI_OK;
-        }
-        c.expect_body = clen;
-        c.body_so_far = c.rxbuf.size() - used;
-        if (c.body_so_far < clen) {
-          c.phase = 1;
-          c.rxbuf = c.rxbuf.substr(used);
-          return NI_OK;
-        }
-        c.body = c.rxbuf.substr(used, clen);
-        c.phase = 2;
         // authentication: the bearer token must be present
         bool authed = opt_.token.empty();
         for (auto& kv : c.req.headers) {
@@ -287,36 +306,49 @@ int ReceiverGateway::handle_readable(ClientState& c, int64_t now_ms) {
         }
         c.connect_mode = is_connect;
         c.stream = next_stream_++;
-        if (next_stream_ >= NI_PROXY_MAX_STREAMS * 2) next_stream_ = 1;
+        // 16383 ids rather than 24. The response carries the request id back (id + 16384), so a reused
+        // id can deliver a late answer to the wrong client; with 24 that is a matter of a minute on a
+        // busy link, with 16383 it cannot happen in practice.
+        if (next_stream_ >= 16384) next_stream_ = 1;
         fd_to_stream_[c.fd] = c.stream;
         std::string head = c.req.header();
         std::vector<uint8_t> blob;
         blob.insert(blob.end(), head.begin(), head.end());
         blob.insert(blob.end(), c.body.begin(), c.body.end());
-        if (!send_) {
-          reply_error(c, 503, "no acoustic session: nothing to forward through");
-          return NI_OK;
-        }
-        int rc = send_(c.stream, NI_MSG_STREAM, blob.data(), blob.size(),
-                       NI_MFLAG_FIRST | NI_MFLAG_LAST);
-        if (rc != NI_OK) {
-          reply_error(c, 503, std::string("link refused the request: ") + ni_strerror(rc));
-          return NI_OK;
-        }
-        c.sent_bytes += blob.size();
-        c.phase = c.connect_mode ? 3 : 2;
-        c.deadline_ms = now_ms + NI_PROXY_TIMEOUT_MS;
         // The accept path registers the socket under a placeholder id so the pump can see it before a
-        // request head has arrived. Once the real stream id exists the placeholder has to go: leaving it
-        // meant the pump walked the same socket under two ids, and the orphan copy - still in phase 0 -
-        // hit its own deadline later and wrote a 504 onto a connection whose response was still in
-        // flight.
+        // request head has arrived; once the on-air id exists the placeholder has to go. Two separate
+        // failures lived in the four lines that used to be here, and both of them look identical from
+        // outside - the request crosses the air and nothing ever comes back:
+        //
+        //  (1) The copy of the client was taken AFTER the placeholder had been erased. `c` is a
+        //      reference INTO clients_, so that copy read freed memory: fd came back as -1 and phase as
+        //      0. The pump's flush is guarded by `fd >= 0`, so the response was written nowhere at all,
+        //      not even a 504, and the browser simply hung. (Defect 61. Measured, not guessed: the
+        //      placeholder entry was replaced by one with fd=-1 in the probe that led here.)
+        //  (2) The request was handed to the link BEFORE the id was registered, so an answer produced
+        //      inside send_() - a loopback link, a simulated channel, or any giver faster than the next
+        //      pump - found no client and was dropped as NI_ERR_PARAM. (Defect 62.)
+        //
+        // So: take the value copy while the reference is alive, re-key, and only then send.
+        ClientState snapshot = c;
+        snapshot.phase = snapshot.connect_mode ? 3 : 2;
+        snapshot.deadline_ms = now_ms + NI_PROXY_TIMEOUT_MS;
+        snapshot.sent_bytes += blob.size();
         for (auto& kv : clients_)
-          if (kv.first != c.stream && kv.second.fd == c.fd) {
+          if (kv.first != snapshot.stream && kv.second.fd == snapshot.fd) {
             clients_.erase(kv.first);
             break;
           }
-        clients_[c.stream] = c;
+        clients_[snapshot.stream] = snapshot;
+        if (!send_) {
+          reply_error(clients_[snapshot.stream], 503, "no acoustic session: nothing to forward through");
+          return NI_OK;
+        }
+        int rc = send_(snapshot.stream, NI_MSG_STREAM, blob.data(), blob.size(),
+                       NI_MFLAG_FIRST | NI_MFLAG_LAST);
+        if (rc != NI_OK)
+          reply_error(clients_[snapshot.stream], 503,
+                      std::string("link refused the request: ") + ni_strerror(rc));
         return NI_OK;
       }
       if (c.phase == 3) {  // tunnel: relay client bytes upward
@@ -357,7 +389,6 @@ int ReceiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, s
     size_t h = c.rxbuf.find("\r\n\r\n");
     if (h != std::string::npos) {
       std::string head = c.rxbuf.substr(0, h + 4);
-      size_t body_have = c.rxbuf.size() - (h + 4);
       if (head.rfind("HTTP/1.1 200 Connection Established", 0) == 0 || c.connect_mode) {
         // tunnel established: everything after the head is relayed raw
         std::string rest = c.rxbuf.substr(h + 4);
@@ -367,8 +398,13 @@ int ReceiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, s
         c.phase = 3;
       } else {
         c.txbuf += head;
-        c.rxbuf = c.rxbuf.substr(h + 4);
-        c.phase = 3;  // body follows as opaque bytes
+        // Whatever came in the same call as the head is body, and the client is waiting for it: this
+        // used to be left in rxbuf "for the relay" and the relay is one-directional, so a response whose
+        // body travelled with its head arrived as a bare head with no body. (Defect 63.)
+        std::string body_with_head = c.rxbuf.substr(h + 4);
+        c.txbuf += body_with_head;
+        c.rxbuf.clear();
+        c.phase = 3;  // any further body arrives as opaque bytes
         c.content_left = 0;
         c.have_content_len = false;
         for (size_t i = 0; i < head.size();) {
@@ -388,7 +424,6 @@ int ReceiverGateway::on_stream(uint16_t stream, int type, const uint8_t* data, s
           }
           i = e + 2;
         }
-        (void)body_have;
       }
     }
     return NI_OK;
@@ -426,16 +461,31 @@ int ReceiverGateway::pump(int64_t now_ms) {
     clients_[sid] = c;
     fd_to_stream_[(int)fd] = sid;
   }
+  // A snapshot of the ids, not the map itself. handle_readable() re-keys a client (erase + insert) as
+  // soon as it has parsed a request head, and erasing the very element a range-for is walking is
+  // undefined behaviour; every lookup here is fresh, and after handle_readable() returns the entry is
+  // found again by socket because its key may have changed. (Defect 61's second half.)
+  std::vector<uint16_t> ids;
+  ids.reserve(clients_.size());
+  for (auto& kv : clients_) ids.push_back(kv.first);
   std::vector<uint16_t> dead;
-  for (auto& kv : clients_) {
-    ClientState& c = kv.second;
-    handle_readable(c, now_ms);
+  for (uint16_t id : ids) {
+    auto it = clients_.find(id);
+    if (it == clients_.end()) continue;
+    const int fd = it->second.fd;
+    handle_readable(it->second, now_ms);
+    uint16_t cur = id;
+    auto fit = fd_to_stream_.find(fd);
+    if (fit != fd_to_stream_.end() && clients_.count(fit->second)) cur = fit->second;
+    auto cit = clients_.find(cur);
+    if (cit == clients_.end()) continue;
+    ClientState& c = cit->second;
     if (!c.txbuf.empty() && c.fd >= 0) {
       int s = (int)::send(c.fd, c.txbuf.data(), c.txbuf.size(), 0);
       if (s > 0) c.txbuf.erase(0, (size_t)s);
     }
     if (c.phase == 4) {
-      if (c.txbuf.empty()) dead.push_back(kv.first);
+      if (c.txbuf.empty()) dead.push_back(cur);
     }
     if (now_ms > c.deadline_ms + NI_PROXY_TIMEOUT_MS) {
       if (c.phase < 4) reply_error(c, 504, "acoustic link timed out");

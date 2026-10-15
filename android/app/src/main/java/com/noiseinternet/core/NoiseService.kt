@@ -44,6 +44,10 @@ class NoiseService : VpnService(), AudioEngine.Sink {
         const val EXTRA_FS = "fs"
         const val EXTRA_DUPLEX = "duplex"
         const val EXTRA_TUNNEL = "tunnel"
+        // Defect 27: the receiver's proxy authenticates clients with a bearer token; the console build
+        // has --proxy-token and the phone had nothing. Empty means "generate one" (the engine's own
+        // default), non-empty means the user's.
+        const val EXTRA_PROXY_TOKEN = "proxy_token"
         const val EXTRA_INPUT = "input_type"
         const val EXTRA_OUTPUT = "output_type"
 
@@ -148,6 +152,7 @@ class NoiseService : VpnService(), AudioEngine.Sink {
             sampleRate = intent?.getIntExtra(EXTRA_FS, 0)?.takeIf { it > 0 } ?: nativeSampleRate(),
             duplex = intent?.getBooleanExtra(EXTRA_DUPLEX, false) ?: false,
             proxyEnable = true,
+            proxyToken = intent?.getStringExtra(EXTRA_PROXY_TOKEN) ?: "",
         )
         startForeground(4242, buildNotification("starting"))
         acquireWakeLock()
